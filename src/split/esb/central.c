@@ -44,9 +44,6 @@ static K_SEM_DEFINE(esb_send_cmd_sem, 1, 1);
 
 static uint16_t cmd_message_id = 0;
 
-#define ESB_MAX_TRACKED_SOURCES 4
-static bool held_positions[ESB_MAX_TRACKED_SOURCES][UINT8_MAX + 1];
-
 static void publish_events_work(struct k_work *work);
 
 K_WORK_DEFINE(publish_events, publish_events_work);
@@ -229,32 +226,11 @@ static void publish_events_work(struct k_work *work) {
             zmk_split_esb_get_item(&rx_buf, (uint8_t *)&env, sizeof(struct esb_event_envelope));
         switch (item_err) {
         case 0:
-            if (env.payload.event.type ==
-                ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_KEY_POSITION_EVENT) {
-                uint8_t src = env.payload.source;
-                uint8_t pos = env.payload.event.data.key_position_event.position;
-                bool pressed = env.payload.event.data.key_position_event.pressed;
-
-                if (src < ESB_MAX_TRACKED_SOURCES) {
-                    if (held_positions[src][pos] == pressed) {
-                        LOG_DBG("esb: central key dedup source=%u position=%u pressed=%u",
-                                src, pos, pressed);
-                        break;
-                    }
-                    held_positions[src][pos] = pressed;
-                }
-
-                LOG_INF("esb: central key deliver source=%u position=%u pressed=%u",
-                        src, pos, pressed);
-                zmk_split_transport_central_peripheral_event_handler(&esb_central, src,
-                                                                     env.payload.event);
-            } else {
-                LOG_DBG("Publish peripheral event source=%u type=%u", env.payload.source,
-                        env.payload.event.type);
-                zmk_split_transport_central_peripheral_event_handler(&esb_central,
-                                                                     env.payload.source,
-                                                                     env.payload.event);
-            }
+            LOG_DBG("Publish peripheral event source=%u type=%u", env.payload.source,
+                    env.payload.event.type);
+            zmk_split_transport_central_peripheral_event_handler(&esb_central,
+                                                                 env.payload.source,
+                                                                 env.payload.event);
             break;
         case -EAGAIN:
             return;
