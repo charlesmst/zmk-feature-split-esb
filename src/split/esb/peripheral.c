@@ -120,13 +120,22 @@ split_peripheral_esb_report_event(const struct zmk_split_transport_peripheral_ev
         return 0;
     }
 
+    // Drop stale input events when the radio is inactive to prevent cursor jumps on resume.
+    // Key position events are always queued — they must not be silently dropped.
+    if (event->type == ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT &&
+        !zmk_split_esb_is_active()) {
+        LOG_WRN("esb: dropping input event (radio inactive)");
+        k_sem_give(&esb_send_evt_sem);
+        return 0;
+    }
+
     // Data + type + source
     size_t payload_size =
         data_size + sizeof(peripheral_id) + sizeof(enum zmk_split_transport_peripheral_event_type);
 
     if (ring_buf_space_get(&chosen_tx_buf) < ESB_MSG_EXTRA_SIZE + payload_size) {
-        LOG_WRN("No room to send peripheral to the central (have %d but only space for %d/%d)",
-                ESB_MSG_EXTRA_SIZE + payload_size, ring_buf_space_get(&chosen_tx_buf),
+        LOG_WRN("No room for peripheral event type=%u src=%u need=%u have=%u/%u", event->type,
+                peripheral_id, ESB_MSG_EXTRA_SIZE + payload_size, ring_buf_space_get(&chosen_tx_buf),
                 ring_buf_capacity_get(&chosen_tx_buf));
         k_sem_give(&esb_send_evt_sem);
         return -ENOSPC;
@@ -161,7 +170,11 @@ split_peripheral_esb_report_event(const struct zmk_split_transport_peripheral_ev
     if (++message_id == 0) {
         message_id = 1;
     }
-    struct esb_msg_meta meta = {.message_id = message_id, .max_retry = max_retry};
+    struct esb_msg_meta meta = {
+        .message_id = message_id,
+        .max_retry = max_retry,
+        .pipe = peripheral_id,
+    };
 
     put = ring_buf_put(&chosen_tx_buf, (uint8_t *)&meta, sizeof(meta));
     if (put != sizeof(meta)) {
@@ -170,6 +183,13 @@ split_peripheral_esb_report_event(const struct zmk_split_transport_peripheral_ev
     // LOG_HEXDUMP_DBG(&meta, sizeof(meta), "meta");
 
     begin_tx();
+    if (event->type == ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_KEY_POSITION_EVENT) {
+        LOG_INF("esb: ptx key queued src=%u position=%u pressed=%u msg_id=%u retry=%u",
+                peripheral_id, event->data.key_position_event.position,
+                event->data.key_position_event.pressed, message_id, max_retry);
+    }
+    LOG_DBG("Queued peripheral event type=%u src=%u payload=%u msg_id=%u retry=%u", event->type,
+            peripheral_id, payload_size, message_id, max_retry);
 
     k_sem_give(&esb_send_evt_sem);
     return 0;

@@ -46,6 +46,7 @@ struct esb_msg_postfix {
 struct esb_msg_meta {
     uint16_t message_id;
     uint8_t max_retry;
+    uint8_t pipe;
 } __packed;
 
 #define ESB_MSG_EXTRA_SIZE (sizeof(struct esb_msg_prefix) + sizeof(struct esb_msg_postfix) + sizeof(struct esb_msg_meta))

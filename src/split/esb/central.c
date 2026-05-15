@@ -44,9 +44,17 @@ static K_SEM_DEFINE(esb_send_cmd_sem, 1, 1);
 
 static uint16_t cmd_message_id = 0;
 
+/* Key-position state per source for dedup and stuck-key release.
+ * Source IDs are 1-based in this config (left=1, right=2). */
+#define ESB_MAX_TRACKED_SOURCES 4
+static bool held_positions[ESB_MAX_TRACKED_SOURCES][UINT8_MAX + 1];
+static int64_t last_rx_ms[ESB_MAX_TRACKED_SOURCES];
+
 static void publish_events_work(struct k_work *work);
+static void stuck_key_work_cb(struct k_work *work);
 
 K_WORK_DEFINE(publish_events, publish_events_work);
+static K_WORK_DELAYABLE_DEFINE(stuck_key_work, stuck_key_work_cb);
 
 uint8_t async_rx_buf[RX_BUFFER_SIZE / 2][2];
 
@@ -102,7 +110,7 @@ static int split_central_esb_send_command(uint8_t source,
         data_size + sizeof(source) + sizeof(enum zmk_split_transport_central_command_type);
 
     if (ring_buf_space_get(&tx_buf) < ESB_MSG_EXTRA_SIZE + payload_size) {
-        LOG_WRN("No room to send command to the peripheral %d (have %d but only space for %d/%d)", 
+        LOG_WRN("No room for central cmd type=%u to source=%u need=%u have=%u/%u", cmd.type,
                 source, ESB_MSG_EXTRA_SIZE + payload_size, ring_buf_space_get(&tx_buf),
                 ring_buf_capacity_get(&tx_buf));
         k_sem_give(&esb_send_cmd_sem);
@@ -136,7 +144,11 @@ static int split_central_esb_send_command(uint8_t source,
     if (++cmd_message_id == 0) {
         cmd_message_id = 1;
     }
-    struct esb_msg_meta meta = {.message_id = cmd_message_id, .max_retry = CONFIG_ZMK_SPLIT_ESB_RETRY_CMD};
+    struct esb_msg_meta meta = {
+        .message_id = cmd_message_id,
+        .max_retry = CONFIG_ZMK_SPLIT_ESB_RETRY_CMD,
+        .pipe = source,
+    };
 
     put = ring_buf_put(&tx_buf, (uint8_t *)&meta, sizeof(meta));
     if (put != sizeof(meta)) {
@@ -144,6 +156,8 @@ static int split_central_esb_send_command(uint8_t source,
     }
 
     begin_tx();
+    LOG_DBG("Queued central cmd type=%u source=%u payload=%u msg_id=%u retry=%u", cmd.type, source,
+            payload_size, cmd_message_id, meta.max_retry);
 
     k_sem_give(&esb_send_cmd_sem);
     return 0;
@@ -201,6 +215,34 @@ static void notify_status_work_cb(struct k_work *_work) { notify_transport_statu
 
 static K_WORK_DEFINE(notify_status_work, notify_status_work_cb);
 
+static void stuck_key_work_cb(struct k_work *work) {
+    int64_t now = k_uptime_get();
+
+    for (uint8_t src = 0; src < ESB_MAX_TRACKED_SOURCES; src++) {
+        if (last_rx_ms[src] == 0) {
+            continue;
+        }
+        if (now - last_rx_ms[src] < CONFIG_ZMK_SPLIT_ESB_STUCK_KEY_RELEASE_MS) {
+            continue;
+        }
+        for (uint16_t pos = 0; pos <= UINT8_MAX; pos++) {
+            if (!held_positions[src][pos]) {
+                continue;
+            }
+            LOG_WRN("esb: central stuck-key release source=%u position=%u", src, (uint8_t)pos);
+            held_positions[src][pos] = false;
+            struct zmk_split_transport_peripheral_event release = {
+                .type = ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_KEY_POSITION_EVENT,
+                .data = {.key_position_event = {.position = (uint8_t)pos, .pressed = false}},
+            };
+            zmk_split_transport_central_peripheral_event_handler(&esb_central, src, release);
+        }
+    }
+
+    k_work_schedule(&stuck_key_work,
+                    K_MSEC(CONFIG_ZMK_SPLIT_ESB_STUCK_KEY_RELEASE_MS / 2));
+}
+
 static int zmk_split_esb_central_init(void) {
     int ret = zmk_split_esb_init(APP_ESB_MODE_PRX, zmk_split_esb_on_prx_esb_callback);
     if (ret) {
@@ -208,6 +250,8 @@ static int zmk_split_esb_central_init(void) {
         return ret;
     }
     k_work_submit(&notify_status_work);
+    k_work_schedule(&stuck_key_work,
+                    K_MSEC(CONFIG_ZMK_SPLIT_ESB_STUCK_KEY_RELEASE_MS / 2));
     return 0;
 }
 
@@ -220,8 +264,33 @@ static void publish_events_work(struct k_work *work) {
             zmk_split_esb_get_item(&rx_buf, (uint8_t *)&env, sizeof(struct esb_event_envelope));
         switch (item_err) {
         case 0:
-            zmk_split_transport_central_peripheral_event_handler(&esb_central, env.payload.source,
-                                                                 env.payload.event);
+            if (env.payload.event.type ==
+                ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_KEY_POSITION_EVENT) {
+                uint8_t src = env.payload.source;
+                uint8_t pos = env.payload.event.data.key_position_event.position;
+                bool pressed = env.payload.event.data.key_position_event.pressed;
+
+                if (src < ESB_MAX_TRACKED_SOURCES) {
+                    last_rx_ms[src] = k_uptime_get();
+                    if (held_positions[src][pos] == pressed) {
+                        LOG_DBG("esb: central key dedup source=%u position=%u pressed=%u",
+                                src, pos, pressed);
+                        break;
+                    }
+                    held_positions[src][pos] = pressed;
+                }
+
+                LOG_INF("esb: central key deliver source=%u position=%u pressed=%u",
+                        src, pos, pressed);
+                zmk_split_transport_central_peripheral_event_handler(&esb_central, src,
+                                                                     env.payload.event);
+            } else {
+                LOG_DBG("Publish peripheral event source=%u type=%u", env.payload.source,
+                        env.payload.event.type);
+                zmk_split_transport_central_peripheral_event_handler(&esb_central,
+                                                                     env.payload.source,
+                                                                     env.payload.event);
+            }
             break;
         case -EAGAIN:
             return;

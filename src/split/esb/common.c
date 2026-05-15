@@ -52,7 +52,8 @@ void zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state) {
         .data = buf,
         .len = meta_offset,
         .message_id = meta.message_id,
-        .max_retry = meta.max_retry
+        .max_retry = meta.max_retry,
+        .pipe = meta.pipe,
     };
     zmk_split_esb_send(&tx_data); // callback > zmk_split_esb_cb()
 
@@ -76,7 +77,7 @@ void zmk_split_esb_cb(app_esb_event_t *event, struct zmk_split_esb_async_state *
                 zmk_split_esb_async_tx(state);
             }
             break;
-        case APP_ESB_EVT_RX:
+        case APP_ESB_EVT_RX: {
             // LOG_DBG("ESB RX received: %d", event->data_length);
 
             // lock it for a safe result from ring_buf_space_get()
@@ -90,7 +91,7 @@ void zmk_split_esb_cb(app_esb_event_t *event, struct zmk_split_esb_async_state *
             }
 
             if (ring_buf_space_get(state->rx_buf) < event->data_length) {
-                LOG_WRN("No room to receive from peripheral (have %d but only space for %d/%d)",
+                LOG_WRN("No room in RX ring for incoming ESB payload len=%u have=%u/%u",
                         event->data_length, ring_buf_space_get(state->rx_buf), 
                         ring_buf_capacity_get(state->rx_buf));
                 k_sem_give(&esb_cb_sem);
@@ -106,7 +107,7 @@ void zmk_split_esb_cb(app_esb_event_t *event, struct zmk_split_esb_async_state *
 
             k_sem_give(&esb_cb_sem);
 
-            // LOG_DBG("RX + %3d and now buffer is %3d", received, ring_buf_size_get(state->rx_buf));
+            LOG_INF("esb: cb rx received=%u buf_used=%u", received, ring_buf_size_get(state->rx_buf));
             if (state->process_tx_callback) {
                 state->process_tx_callback();
             } else if (state->process_tx_work) {
@@ -114,6 +115,7 @@ void zmk_split_esb_cb(app_esb_event_t *event, struct zmk_split_esb_async_state *
             }
 
             break;
+        }
         default:
             LOG_ERR("Unknown APP ESB event!");
             break;
@@ -147,7 +149,8 @@ int zmk_split_esb_get_item(struct ring_buf *rx_buf, uint8_t *env, size_t env_siz
             //     LOG_WRN("Prefix mismatch, discarding byte %02x", dummy);
             // }
             /*** ****/
-            LOG_WRN("Multiple prefix mismatches, resetting buffer");
+            LOG_WRN("Prefix mismatch in RX buffer, resetting buffer size=%u",
+                    ring_buf_size_get(rx_buf));
             ring_buf_reset(rx_buf);
 
             return -EINVAL;
@@ -156,8 +159,8 @@ int zmk_split_esb_get_item(struct ring_buf *rx_buf, uint8_t *env, size_t env_siz
         size_t payload_to_read = sizeof(prefix) + prefix.payload_size;
 
         if (payload_to_read > env_size) {
-            LOG_WRN("Invalid message with payload %d bigger than expected max %d", payload_to_read,
-                    env_size);
+            LOG_WRN("Invalid RX payload size=%u bigger than expected max=%u, resetting buffer",
+                    payload_to_read, env_size);
             ring_buf_reset(rx_buf);
             return -EINVAL;
         }
@@ -183,8 +186,8 @@ int zmk_split_esb_get_item(struct ring_buf *rx_buf, uint8_t *env, size_t env_siz
         uint32_t crc = crc32_ieee(env, payload_to_read);
 
         if (crc != postfix.crc) {
-            LOG_WRN("Data corruption in received peripheral event, resetting buffer (%d vs %d)",
-                    crc, postfix.crc);
+            LOG_WRN("CRC mismatch in RX payload crc=%u expected=%u payload_size=%u, resetting buffer",
+                    crc, postfix.crc, payload_to_read);
             ring_buf_reset(rx_buf);
             return -EINVAL;
         }

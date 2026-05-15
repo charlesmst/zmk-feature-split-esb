@@ -31,6 +31,7 @@ typedef struct {
     uint32_t len;
     uint16_t message_id;
     uint8_t max_retry;
+    uint8_t pipe;
 } app_esb_data_t;
 
 typedef struct {
@@ -48,6 +49,8 @@ struct esb_simple_addr {
 int zmk_split_esb_init(app_esb_mode_t mode, app_esb_callback_t callback);
 
 int zmk_split_esb_set_enable(bool enabled);
+
+bool zmk_split_esb_is_active(void);
 
 int zmk_split_esb_send(app_esb_data_t *tx_packet);
 
