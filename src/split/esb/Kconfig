@@ -72,10 +72,6 @@ config ZMK_SPLIT_ESB_MSGQ_FULL_TIMEOUT_MS
     int "Timeout (ms) to clear retry table when msgq stays full"
     default 3000
 
-config ZMK_SPLIT_ESB_STUCK_KEY_RELEASE_MS
-    int "Milliseconds of silence from a source before held keys are force-released (0 to disable)"
-    default 2000
-
 module = ZMK_SPLIT_ESB
 module-str = ZMK_SPLIT_ESB
 source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"
