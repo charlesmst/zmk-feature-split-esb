@@ -31,6 +31,7 @@ struct esb_command_envelope {
 
 struct esb_event_payload {
     uint8_t source;
+    uint8_t sequence;
     struct zmk_split_transport_peripheral_event event;
 } __packed;
 

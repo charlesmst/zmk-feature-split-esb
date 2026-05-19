@@ -43,6 +43,7 @@ RING_BUF_DECLARE(chosen_tx_buf, TX_BUFFER_SIZE);
 static K_SEM_DEFINE(esb_send_evt_sem, 1, 1);
 
 static const uint8_t peripheral_id = CONFIG_ZMK_SPLIT_ESB_PERIPHERAL_ID;
+static uint8_t next_event_sequence;
 
 static void publish_commands_work(struct k_work *work);
 
@@ -101,8 +102,8 @@ split_peripheral_esb_report_event(const struct zmk_split_transport_peripheral_ev
     }
 
     // Data + type + source
-    size_t payload_size =
-        data_size + sizeof(peripheral_id) + sizeof(enum zmk_split_transport_peripheral_event_type);
+    size_t payload_size = data_size + sizeof(peripheral_id) + sizeof(next_event_sequence) +
+                          sizeof(enum zmk_split_transport_peripheral_event_type);
 
     if (ring_buf_space_get(&chosen_tx_buf) < ESB_MSG_EXTRA_SIZE + payload_size) {
         LOG_WRN("No room to send peripheral to the central (have %d but only space for %d/%d)",
@@ -118,6 +119,7 @@ split_peripheral_esb_report_event(const struct zmk_split_transport_peripheral_ev
                                     },
                                     .payload = {
                                         .source = peripheral_id,
+                                        .sequence = next_event_sequence++,
                                         .event = *event,
                                     }};
 

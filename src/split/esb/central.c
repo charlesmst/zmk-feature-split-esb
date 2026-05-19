@@ -46,6 +46,9 @@ static void publish_events_work(struct k_work *work);
 
 K_WORK_DEFINE(publish_events, publish_events_work);
 
+static uint8_t last_event_sequence_by_source[UINT8_MAX + 1];
+static bool last_event_sequence_valid_by_source[UINT8_MAX + 1];
+
 uint8_t async_rx_buf[RX_BUFFER_SIZE / 2][2];
 
 static struct zmk_split_esb_async_state async_state = {
@@ -59,6 +62,17 @@ static struct zmk_split_esb_async_state async_state = {
 
 static void begin_tx(void) {
     zmk_split_esb_async_tx(&async_state);
+}
+
+static bool is_duplicate_event(uint8_t source, uint8_t sequence) {
+    if (last_event_sequence_valid_by_source[source] &&
+        last_event_sequence_by_source[source] == sequence) {
+        return true;
+    }
+
+    last_event_sequence_by_source[source] = sequence;
+    last_event_sequence_valid_by_source[source] = true;
+    return false;
 }
 
 static ssize_t get_payload_data_size(const struct zmk_split_transport_central_command *cmd) {
@@ -205,6 +219,12 @@ static void publish_events_work(struct k_work *work) {
             zmk_split_esb_get_item(&rx_buf, (uint8_t *)&env, sizeof(struct esb_event_envelope));
         switch (item_err) {
         case 0:
+            if (is_duplicate_event(env.payload.source, env.payload.sequence)) {
+                LOG_WRN("Ignoring duplicate ESB event from source %u seq %u", env.payload.source,
+                        env.payload.sequence);
+                break;
+            }
+
             zmk_split_transport_central_peripheral_event_handler(&esb_central, env.payload.source,
                                                                  env.payload.event);
             break;
