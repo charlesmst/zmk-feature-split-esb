@@ -46,8 +46,12 @@ static void publish_events_work(struct k_work *work);
 
 K_WORK_DEFINE(publish_events, publish_events_work);
 
-static uint8_t last_event_sequence_by_source[UINT8_MAX + 1];
-static bool last_event_sequence_valid_by_source[UINT8_MAX + 1];
+#define RECENT_EVENT_SEQUENCE_HISTORY 4
+#define RECENT_EVENT_SEQUENCE_MASK (RECENT_EVENT_SEQUENCE_HISTORY - 1)
+
+static uint8_t recent_event_sequences_by_source[UINT8_MAX + 1][RECENT_EVENT_SEQUENCE_HISTORY];
+static uint8_t recent_event_sequence_counts_by_source[UINT8_MAX + 1];
+static uint8_t next_recent_event_sequence_slot_by_source[UINT8_MAX + 1];
 
 uint8_t async_rx_buf[RX_BUFFER_SIZE / 2][2];
 
@@ -65,13 +69,23 @@ static void begin_tx(void) {
 }
 
 static bool is_duplicate_event(uint8_t source, uint8_t sequence) {
-    if (last_event_sequence_valid_by_source[source] &&
-        last_event_sequence_by_source[source] == sequence) {
-        return true;
+    uint8_t count = recent_event_sequence_counts_by_source[source];
+
+    for (uint8_t i = 0; i < count; i++) {
+        if (recent_event_sequences_by_source[source][i] == sequence) {
+            return true;
+        }
     }
 
-    last_event_sequence_by_source[source] = sequence;
-    last_event_sequence_valid_by_source[source] = true;
+    uint8_t slot = next_recent_event_sequence_slot_by_source[source];
+    recent_event_sequences_by_source[source][slot] = sequence;
+
+    if (count < RECENT_EVENT_SEQUENCE_HISTORY) {
+        recent_event_sequence_counts_by_source[source] = count + 1;
+    }
+
+    next_recent_event_sequence_slot_by_source[source] =
+        (slot + 1) & RECENT_EVENT_SEQUENCE_MASK;
     return false;
 }
 
