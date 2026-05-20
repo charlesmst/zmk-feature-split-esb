@@ -29,6 +29,8 @@ typedef struct {
 typedef struct {
     uint8_t *data;
     uint32_t len;
+    bool noack;
+    uint8_t retries;
 } app_esb_data_t;
 
 typedef struct {

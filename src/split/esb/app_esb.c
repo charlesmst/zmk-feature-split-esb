@@ -49,13 +49,21 @@ uint8_t esb_addr_prefix[4] = DT_INST_PROP(0, addr_prefix);
 
 static app_esb_callback_t m_callback;
 
+struct queued_tx_payload {
+    struct esb_payload payload;
+    uint8_t retries_remaining;
+};
+
 // Define a buffer of payloads to store TX payloads in between timeslots
-K_MSGQ_DEFINE(m_msgq_tx_payloads, sizeof(struct esb_payload), 
+K_MSGQ_DEFINE(m_msgq_tx_payloads, sizeof(struct queued_tx_payload), 
               CONFIG_ZMK_SPLIT_ESB_PROTO_MSGQ_ITEMS, 4);
 
 static app_esb_mode_t m_mode;
 static bool m_active = false;
 static bool m_enabled = false;
+static bool m_tx_in_flight;
+static bool m_current_tx_valid;
+static struct queued_tx_payload m_current_tx;
 
 static int pull_packet_from_tx_msgq(void);
 
@@ -67,20 +75,36 @@ static void event_handler(struct esb_evt const *event) {
         case ESB_EVENT_TX_SUCCESS:
             // LOG_DBG("TX SUCCESS, tx_attempts: %d", event->tx_attempts);
             // LOG_DBG("give d1");
+            m_tx_in_flight = false;
+            m_current_tx_valid = false;
             // Forward an event to the application
             m_event.evt_type = APP_ESB_EVT_TX_SUCCESS;
             m_callback(&m_event);
             pull_packet_from_tx_msgq();
             break;
-        case ESB_EVENT_TX_FAILED:
+        case ESB_EVENT_TX_FAILED: {
             LOG_WRN("TX FAILED, tx_attempts: %d", event->tx_attempts);
-            // esb_flush_tx(); // DOUH, had fixed @ 3.1.0-rc1, not ready yet.
+            m_tx_in_flight = false;
+            int pop_err = esb_pop_tx();
+            if (pop_err) {
+                LOG_WRN("esb_pop_tx failed after TX_FAILED (%d)", pop_err);
+            }
+
+            if (m_current_tx_valid && m_current_tx.retries_remaining > 0) {
+                m_current_tx.retries_remaining--;
+                LOG_WRN("Retrying ESB payload, retries left %d", m_current_tx.retries_remaining);
+                pull_packet_from_tx_msgq();
+                break;
+            }
+
+            m_current_tx_valid = false;
             // Forward an event to the application
             m_event.evt_type = APP_ESB_EVT_TX_FAIL;
             m_callback(&m_event);
             pull_packet_from_tx_msgq();
             break;
-        case ESB_EVENT_RX_RECEIVED:
+        }
+        case ESB_EVENT_RX_RECEIVED: {
             // LOG_DBG("RX SUCCESS");
             struct esb_payload rx_payload;
             uint8_t buf[CONFIG_ESB_MAX_PAYLOAD_LENGTH];
@@ -94,6 +118,7 @@ static void event_handler(struct esb_evt const *event) {
                 m_callback(&m_event);
             }
             break;
+        }
     }
 }
 
@@ -177,53 +202,45 @@ static int esb_initialize(app_esb_mode_t mode) {
 
 static int pull_packet_from_tx_msgq(void) {
     int ret = 0;
-    struct esb_payload tx_payload;
     static uint8_t que_was_fulled = 0;
 
-    if (k_msgq_peek(&m_msgq_tx_payloads, &tx_payload) == 0) {
-        ret = esb_write_payload(&tx_payload);
-
-        if (ret == -ENOMEM) {
-            LOG_WRN("esb_tx_fifo: queue full %d", que_was_fulled);
-
-            // *** deprecated pre-emptive queuing logic ***
-            // LOG_DBG("esb_tx_fifo: queue full, popping first message and queueing again");
-            // ret = esb_pop_tx();
-            // if (ret) {
-            //     LOG_ERR("esb_tx_fifo: popping first message and queueing failed (%d)", ret);
-            // }
-            // ret = esb_write_payload(&tx_payload);
-            // if (ret) {
-            //     LOG_ERR("esb_write_payload failed (%d)", ret);
-            // }
-
-            // force dequeue, guarding for phantom PRX.
-            que_was_fulled++;
-            if (que_was_fulled >= ESB_TX_FIFO_REQUE_MAX) {
-                esb_flush_tx();
-                // dequeue FIFO msg
-                k_msgq_get(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
-            }
-
-        } else if (ret == -EMSGSIZE) {
-            LOG_WRN("esb_tx_fifo: tx_payload size too large (%d) > CONFIG_ESB_MAX_PAYLOAD_LENGTH (%d)",
-                    tx_payload.length, CONFIG_ESB_MAX_PAYLOAD_LENGTH);
-            // dequeue FIFO msg
-            k_msgq_get(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
-
-        } else if (ret) {
-            LOG_WRN("esb_write_payload failed (%d)", ret);
-
-        } else {
-            // LOG_DBG("Payload len: %d", tx_payload.length);
-            esb_start_tx();
-            // dequeue FIFO msg
-            k_msgq_get(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
-            que_was_fulled = 0;
-        }
+    if (m_tx_in_flight) {
+        return 0;
     }
 
-    esb_start_tx();
+    if (!m_current_tx_valid) {
+        if (k_msgq_get(&m_msgq_tx_payloads, &m_current_tx, K_NO_WAIT) != 0) {
+            return 0;
+        }
+        m_current_tx_valid = true;
+    }
+
+    ret = esb_write_payload(&m_current_tx.payload);
+
+    if (ret == -ENOMEM) {
+        LOG_WRN("esb_tx_fifo: queue full %d", que_was_fulled);
+
+        // force dequeue, guarding for phantom PRX.
+        que_was_fulled++;
+        if (que_was_fulled >= ESB_TX_FIFO_REQUE_MAX) {
+            esb_flush_tx();
+            m_current_tx_valid = false;
+        }
+
+    } else if (ret == -EMSGSIZE) {
+        LOG_WRN("esb_tx_fifo: tx_payload size too large (%d) > CONFIG_ESB_MAX_PAYLOAD_LENGTH (%d)",
+                m_current_tx.payload.length, CONFIG_ESB_MAX_PAYLOAD_LENGTH);
+        m_current_tx_valid = false;
+
+    } else if (ret) {
+        LOG_WRN("esb_write_payload failed (%d)", ret);
+
+    } else {
+        esb_start_tx();
+        m_tx_in_flight = true;
+        que_was_fulled = 0;
+    }
+
     return ret;
 }
 
@@ -253,16 +270,17 @@ int zmk_split_esb_set_enable(bool enabled) {
 
 int zmk_split_esb_send(app_esb_data_t *tx_packet) {
     int ret = 0;
-    struct esb_payload tx_payload;
-    tx_payload.pipe = 0;
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_ESB_PROTO_TX_ACK)
-    tx_payload.noack = false;
-#else
-    tx_payload.noack = true;
-#endif
-    memcpy(tx_payload.data, tx_packet->data, tx_packet->len);
-    tx_payload.length = tx_packet->len;
-    if (!tx_payload.length) {
+    struct queued_tx_payload tx_payload = {
+        .payload = {
+            .pipe = 0,
+            .noack = tx_packet->noack || !IS_ENABLED(CONFIG_ZMK_SPLIT_ESB_PROTO_TX_ACK),
+            .length = tx_packet->len,
+        },
+        .retries_remaining = tx_packet->retries,
+    };
+
+    memcpy(tx_payload.payload.data, tx_packet->data, tx_packet->len);
+    if (!tx_payload.payload.length) {
         LOG_WRN("bypass queuing null payload");
         return 0;
     }
@@ -279,7 +297,7 @@ int zmk_split_esb_send(app_esb_data_t *tx_packet) {
     if (ret != 0) {
         LOG_WRN("Failed to queue esb tx_payload_q (%d)", ret);
     }
-    if (m_active) {
+    if (m_active && !m_tx_in_flight) {
         pull_packet_from_tx_msgq();
     }
     return ret;
