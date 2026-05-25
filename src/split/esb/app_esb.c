@@ -192,8 +192,9 @@ static int esb_initialize(app_esb_mode_t mode) {
     config.protocol = ESB_PROTOCOL_ESB_DPL;
     config.retransmit_delay = CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_DELAY;
     config.retransmit_count = CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_COUNT;
-    config.bitrate = ESB_BITRATE_2MBPS;
+    config.bitrate = ESB_BITRATE_1MBPS_BLE;
     config.tx_output_power = ESB_TX_POWER_4DBM;
+    config.use_fast_ramp_up = true;
     config.event_handler = event_handler;
     config.mode = (mode == APP_ESB_MODE_PTX) ? ESB_MODE_PTX : ESB_MODE_PRX;
     config.tx_mode = ESB_TXMODE_MANUAL_START;
@@ -201,6 +202,12 @@ static int esb_initialize(app_esb_mode_t mode) {
 
     err = esb_init(&config);
 
+    if (err) {
+        return err;
+    }
+
+    /* Channel 80 = 2480 MHz — above WiFi 1/6/11/13, clear of the crowded 2.4 GHz band */
+    err = esb_set_rf_channel(80);
     if (err) {
         return err;
     }
