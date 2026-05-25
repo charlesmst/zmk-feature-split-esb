@@ -50,12 +50,67 @@ uint8_t esb_addr_prefix[4] = DT_INST_PROP(0, addr_prefix);
 static app_esb_callback_t m_callback;
 
 // Define a buffer of payloads to store TX payloads in between timeslots
-K_MSGQ_DEFINE(m_msgq_tx_payloads, sizeof(struct esb_payload), 
+K_MSGQ_DEFINE(m_msgq_tx_payloads, sizeof(struct esb_payload),
               CONFIG_ZMK_SPLIT_ESB_PROTO_MSGQ_ITEMS, 4);
 
 static app_esb_mode_t m_mode;
 static bool m_active = false;
 static bool m_enabled = false;
+
+/* --- Option 5: jitter retransmit delay ±12.5% --- */
+static uint32_t m_jitter_rng;
+
+static uint16_t jittered_retransmit_delay(void) {
+    if (m_jitter_rng == 0) {
+        uint32_t seed = k_uptime_get_32() ^ (k_cycle_get_32() * 2654435761u);
+        m_jitter_rng = seed ? seed : 0xA3C59B1Du;
+    }
+    m_jitter_rng ^= m_jitter_rng << 13;
+    m_jitter_rng ^= m_jitter_rng >> 17;
+    m_jitter_rng ^= m_jitter_rng << 5;
+    const uint32_t base = CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_DELAY;
+    const uint32_t span = base >> 3; /* 12.5% */
+    const int8_t off = (int8_t)(m_jitter_rng & 0xFFu);
+    const int32_t delta = ((int32_t)span * off) / 128;
+    int32_t d = (int32_t)base + delta;
+    if (d < 100) d = 100;
+    if (d > UINT16_MAX) d = UINT16_MAX;
+    return (uint16_t)d;
+}
+
+/* --- Option 7: HFXO persistent hold per ESB session --- */
+static struct onoff_client m_hfxo_cli;
+static bool m_hfxo_held;
+
+static void hfxo_hold(void) {
+    if (m_hfxo_held) {
+        return;
+    }
+    struct onoff_manager *mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
+    if (!mgr) {
+        return;
+    }
+    sys_notify_init_spinwait(&m_hfxo_cli.notify);
+    if (onoff_request(mgr, &m_hfxo_cli) >= 0) {
+        int res;
+        int err;
+        do {
+            err = sys_notify_fetch_result(&m_hfxo_cli.notify, &res);
+        } while (err);
+        m_hfxo_held = (res == 0);
+    }
+}
+
+static void hfxo_release_hold(void) {
+    if (!m_hfxo_held) {
+        return;
+    }
+    struct onoff_manager *mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
+    if (mgr) {
+        (void)onoff_release(mgr);
+    }
+    m_hfxo_held = false;
+}
 
 static int pull_packet_from_tx_msgq(void);
 
@@ -182,6 +237,7 @@ static int pull_packet_from_tx_msgq(void) {
     static uint8_t que_was_fulled = 0;
 
     if (k_msgq_peek(&m_msgq_tx_payloads, &tx_payload) == 0) {
+        esb_set_retransmit_delay(jittered_retransmit_delay());
         ret = esb_write_payload(&tx_payload);
 
         if (ret == -ENOMEM) {
@@ -288,6 +344,7 @@ int zmk_split_esb_send(app_esb_data_t *tx_packet) {
 
 static int app_esb_suspend(void) {
     m_active = false;
+    hfxo_release_hold();
     if(m_mode == APP_ESB_MODE_PTX) {
         uint32_t irq_key = irq_lock();
 
@@ -320,6 +377,7 @@ static int app_esb_suspend(void) {
 }
 
 static int app_esb_resume(void) {
+    hfxo_hold();
     if(m_mode == APP_ESB_MODE_PTX) {
         int err = esb_initialize(m_mode);
         m_active = true;
