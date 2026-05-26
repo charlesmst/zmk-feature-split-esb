@@ -192,7 +192,7 @@ static int esb_initialize(app_esb_mode_t mode) {
     config.protocol = ESB_PROTOCOL_ESB_DPL;
     config.retransmit_delay = CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_DELAY;
     config.retransmit_count = CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_COUNT;
-    config.bitrate = ESB_BITRATE_1MBPS_BLE;
+    config.bitrate = ESB_BITRATE_2MBPS_BLE;
     config.tx_output_power = ESB_TX_POWER_4DBM;
     config.use_fast_ramp_up = true;
     config.event_handler = event_handler;
