@@ -266,8 +266,10 @@ split_peripheral_esb_report_event(const struct zmk_split_transport_peripheral_ev
     }
 
     uint16_t msg_id = put_meta(get_retry_count(event), get_meta_flags(event));
-    LOG_DBG("Queued event msg=%u type=%u retry=%u flags=0x%02x", msg_id, event->type,
-            get_retry_count(event), get_meta_flags(event));
+    if (event->type != ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT) {
+        LOG_DBG("Queued event msg=%u type=%u retry=%u flags=0x%02x", msg_id, event->type,
+                get_retry_count(event), get_meta_flags(event));
+    }
 
     begin_tx();
     k_sem_give(&esb_send_evt_sem);

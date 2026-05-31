@@ -228,7 +228,9 @@ static void event_handler(struct esb_evt const *event) {
     app_esb_event_t m_event;
     switch (event->evt_id) {
         case ESB_EVENT_TX_SUCCESS:
-            LOG_DBG("TX success msg=%u attempts=%u", m_current_tx_msg_id, event->tx_attempts);
+            if (!m_current_tx_drop_if_stale) {
+                LOG_DBG("TX success msg=%u attempts=%u", m_current_tx_msg_id, event->tx_attempts);
+            }
             // LOG_DBG("give d1");
             if (!m_current_tx_drop_if_stale) {
                 remove_retry_entry_by_msg_id(m_current_tx_msg_id);
@@ -496,9 +498,11 @@ static int pull_packet_from_tx_msgq(void) {
             m_current_tx_drop_if_stale = tx_payload.drop_if_stale;
             m_current_tx_payload = tx_payload;
             m_current_tx_payload_valid = true;
-            LOG_DBG("TX start msg=%u len=%u drop=%d retry_left=%u recovery=%d",
-                    m_current_tx_msg_id, tx_payload.payload.length, tx_payload.drop_if_stale,
-                    get_retry_left_by_msg_id(tx_payload.message_id), tx_payload.recovery);
+            if (!tx_payload.drop_if_stale || tx_payload.recovery) {
+                LOG_DBG("TX start msg=%u len=%u drop=%d retry_left=%u recovery=%d",
+                        m_current_tx_msg_id, tx_payload.payload.length, tx_payload.drop_if_stale,
+                        get_retry_left_by_msg_id(tx_payload.message_id), tx_payload.recovery);
+            }
             // dequeue FIFO msg
             finish_current_tx_payload(&tx_payload);
             que_was_fulled = 0;

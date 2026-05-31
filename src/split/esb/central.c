@@ -289,8 +289,11 @@ static void publish_events_work(struct k_work *work) {
                 process_key_state(source, env_buf.key_state_env.payload.state,
                                   env_buf.key_state_env.payload.button_state);
             } else {
-                LOG_DBG("RX event source=%u type=%u", env_buf.event_env.payload.source,
-                        env_buf.event_env.payload.event.type);
+                if (env_buf.event_env.payload.event.type !=
+                    ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT) {
+                    LOG_DBG("RX event source=%u type=%u", env_buf.event_env.payload.source,
+                            env_buf.event_env.payload.event.type);
+                }
                 zmk_split_transport_central_peripheral_event_handler(
                     &esb_central, env_buf.event_env.payload.source,
                     env_buf.event_env.payload.event);
