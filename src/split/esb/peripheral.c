@@ -75,7 +75,7 @@ static void begin_tx(void) {
     zmk_split_esb_async_tx(&async_state);
 }
 
-static void put_meta(uint8_t max_retry, uint8_t flags) {
+static uint16_t put_meta(uint8_t max_retry, uint8_t flags) {
     if (++message_id == 0) {
         message_id = 1;
     }
@@ -89,6 +89,7 @@ static void put_meta(uint8_t max_retry, uint8_t flags) {
     if (put != sizeof(meta)) {
         LOG_WRN("Failed to put event meta (%d vs %d)", put, sizeof(meta));
     }
+    return message_id;
 }
 
 void zmk_split_esb_on_ptx_esb_callback(app_esb_event_t *event) {
@@ -152,7 +153,9 @@ static int send_position_state(void) {
         LOG_WRN("Failed to put key state postfix (%d vs %d)", put, sizeof(postfix));
     }
 
-    put_meta(CONFIG_ZMK_SPLIT_ESB_RETRY_KEY_POSITION, ESB_MSG_META_SUPERSEDED_BY_NEWER);
+    uint16_t msg_id = put_meta(CONFIG_ZMK_SPLIT_ESB_RETRY_KEY_POSITION, 0);
+    LOG_DBG("Queued key_state msg=%u source=%u buttons=0x%02x retry=%u", msg_id, peripheral_id,
+            button_state, CONFIG_ZMK_SPLIT_ESB_RETRY_KEY_POSITION);
 
     begin_tx();
     k_sem_give(&esb_send_evt_sem);
@@ -262,7 +265,9 @@ split_peripheral_esb_report_event(const struct zmk_split_transport_peripheral_ev
         LOG_WRN("Failed to put event postfix (%d vs %d)", put, sizeof(postfix));
     }
 
-    put_meta(get_retry_count(event), get_meta_flags(event));
+    uint16_t msg_id = put_meta(get_retry_count(event), get_meta_flags(event));
+    LOG_DBG("Queued event msg=%u type=%u retry=%u flags=0x%02x", msg_id, event->type,
+            get_retry_count(event), get_meta_flags(event));
 
     begin_tx();
     k_sem_give(&esb_send_evt_sem);

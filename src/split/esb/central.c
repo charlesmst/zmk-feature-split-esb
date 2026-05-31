@@ -284,9 +284,13 @@ static void publish_events_work(struct k_work *work) {
             uint8_t raw_source = env_buf.key_state_env.payload.source;
             if (raw_source & ESB_SOURCE_KEY_STATE_FLAG) {
                 uint8_t source = raw_source & ~ESB_SOURCE_KEY_STATE_FLAG;
+                LOG_DBG("RX key_state source=%u buttons=0x%02x", source,
+                        env_buf.key_state_env.payload.button_state);
                 process_key_state(source, env_buf.key_state_env.payload.state,
                                   env_buf.key_state_env.payload.button_state);
             } else {
+                LOG_DBG("RX event source=%u type=%u", env_buf.event_env.payload.source,
+                        env_buf.event_env.payload.event.type);
                 zmk_split_transport_central_peripheral_event_handler(
                     &esb_central, env_buf.event_env.payload.source,
                     env_buf.event_env.payload.event);

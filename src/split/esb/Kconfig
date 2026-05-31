@@ -50,7 +50,7 @@ config ZMK_SPLIT_ESB_RETRY_INPUT_EVENT
 
 config ZMK_SPLIT_ESB_RETRY_KEY_POSITION
     int "Retry count for key position events"
-    default 3
+    default 5
 
 config ZMK_SPLIT_ESB_RETRY_SENSOR_EVENT
     int "Retry count for sensor events"

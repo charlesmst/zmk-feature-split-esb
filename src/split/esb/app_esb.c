@@ -56,6 +56,7 @@ struct queued_tx_payload {
     uint32_t queued_at;
     bool drop_if_stale;
     bool superseded_by_newer;
+    bool recovery;
 };
 
 struct retry_entry {
@@ -69,16 +70,22 @@ struct retry_entry {
 static uint32_t m_msgq_full_last_time;
 static uint16_t m_current_tx_msg_id;
 static bool m_current_tx_drop_if_stale;
+static bool m_current_tx_payload_valid;
 static uint16_t m_latest_superseding_msg_id;
 static bool m_pending_stale_valid;
+static bool m_recovered_tx_valid;
+static struct queued_tx_payload m_current_tx_payload;
 static struct queued_tx_payload m_pending_stale;
+static struct queued_tx_payload m_recovered_tx;
 static struct retry_entry m_retry_table[CONFIG_ZMK_SPLIT_ESB_PROTO_MSGQ_ITEMS];
 
 static void clear_retry_table(void) {
     memset(m_retry_table, 0, sizeof(m_retry_table));
     m_current_tx_msg_id = 0;
     m_current_tx_drop_if_stale = false;
+    m_current_tx_payload_valid = false;
     m_latest_superseding_msg_id = 0;
+    m_recovered_tx_valid = false;
 }
 
 static int find_retry_by_msg_id(uint16_t message_id) {
@@ -221,20 +228,23 @@ static void event_handler(struct esb_evt const *event) {
     app_esb_event_t m_event;
     switch (event->evt_id) {
         case ESB_EVENT_TX_SUCCESS:
-            // LOG_DBG("TX SUCCESS, tx_attempts: %d", event->tx_attempts);
+            LOG_DBG("TX success msg=%u attempts=%u", m_current_tx_msg_id, event->tx_attempts);
             // LOG_DBG("give d1");
             if (!m_current_tx_drop_if_stale) {
                 remove_retry_entry_by_msg_id(m_current_tx_msg_id);
             }
             m_current_tx_msg_id = 0;
             m_current_tx_drop_if_stale = false;
+            m_current_tx_payload_valid = false;
             // Forward an event to the application
             m_event.evt_type = APP_ESB_EVT_TX_SUCCESS;
             m_callback(&m_event);
             pull_packet_from_tx_msgq();
             break;
         case ESB_EVENT_TX_FAILED: {
-            LOG_WRN("TX FAILED, tx_attempts: %d", event->tx_attempts);
+            LOG_WRN("TX failed msg=%u attempts=%u drop=%d retry_left=%u", m_current_tx_msg_id,
+                    event->tx_attempts, m_current_tx_drop_if_stale,
+                    get_retry_left_by_msg_id(m_current_tx_msg_id));
             bool should_retry = false;
 
             if (!m_current_tx_drop_if_stale && !retry_was_superseded_by_newer(m_current_tx_msg_id)) {
@@ -247,6 +257,8 @@ static void event_handler(struct esb_evt const *event) {
             if (should_retry) {
                 int start_ret = esb_start_tx();
                 if (start_ret == 0) {
+                    LOG_DBG("Restarted failed ESB payload msg=%u retry_left=%u",
+                            m_current_tx_msg_id, get_retry_left_by_msg_id(m_current_tx_msg_id));
                     break;
                 }
 
@@ -257,6 +269,7 @@ static void event_handler(struct esb_evt const *event) {
             remove_retry_entry_by_msg_id(m_current_tx_msg_id);
             m_current_tx_msg_id = 0;
             m_current_tx_drop_if_stale = false;
+            m_current_tx_payload_valid = false;
             // Forward an event to the application
             m_event.evt_type = APP_ESB_EVT_TX_FAIL;
             m_callback(&m_event);
@@ -374,13 +387,23 @@ static bool stale_payload_expired(const struct queued_tx_payload *payload) {
 }
 
 static int get_next_tx_payload(struct queued_tx_payload *payload) {
+    if (m_recovered_tx_valid) {
+        *payload = m_recovered_tx;
+        payload->recovery = true;
+        return 0;
+    }
+
     if (k_msgq_peek(&m_msgq_tx_payloads, payload) == 0) {
+        payload->recovery = false;
         return 0;
     }
 
     if (m_pending_stale_valid) {
         *payload = m_pending_stale;
+        payload->recovery = false;
         if (stale_payload_expired(payload)) {
+            LOG_DBG("Drop stale pending input msg=%u age=%u", payload->message_id,
+                    k_uptime_get_32() - payload->queued_at);
             m_pending_stale_valid = false;
             return -EAGAIN;
         }
@@ -391,7 +414,9 @@ static int get_next_tx_payload(struct queued_tx_payload *payload) {
 }
 
 static void finish_current_tx_payload(const struct queued_tx_payload *payload) {
-    if (payload->drop_if_stale) {
+    if (payload->recovery) {
+        m_recovered_tx_valid = false;
+    } else if (payload->drop_if_stale) {
         m_pending_stale_valid = false;
     } else {
         struct queued_tx_payload discarded;
@@ -469,6 +494,11 @@ static int pull_packet_from_tx_msgq(void) {
             }
             m_current_tx_msg_id = tx_payload.message_id;
             m_current_tx_drop_if_stale = tx_payload.drop_if_stale;
+            m_current_tx_payload = tx_payload;
+            m_current_tx_payload_valid = true;
+            LOG_DBG("TX start msg=%u len=%u drop=%d retry_left=%u recovery=%d",
+                    m_current_tx_msg_id, tx_payload.payload.length, tx_payload.drop_if_stale,
+                    get_retry_left_by_msg_id(tx_payload.message_id), tx_payload.recovery);
             // dequeue FIFO msg
             finish_current_tx_payload(&tx_payload);
             que_was_fulled = 0;
@@ -556,6 +586,9 @@ int zmk_split_esb_send(app_esb_data_t *tx_packet) {
         if (idx < 0) {
             LOG_WRN("Failed to add retry entry for msg %d (%d)", tx_packet->message_id, idx);
         }
+        LOG_DBG("Queued reliable msg=%u len=%u retry=%u superseded=%d q_used=%u",
+                tx_packet->message_id, tx_packet->len, tx_packet->max_retry,
+                tx_packet->superseded_by_newer, k_msgq_num_used_get(&m_msgq_tx_payloads));
         m_msgq_full_last_time = 0;
     } else if (ret == -ENOMSG) {
         uint32_t now = k_uptime_get_32();
@@ -583,6 +616,26 @@ static int app_esb_suspend(void) {
     hfxo_release_hold();
     if(m_mode == APP_ESB_MODE_PTX) {
         uint32_t irq_key = irq_lock();
+
+        if (m_current_tx_payload_valid) {
+            if (m_current_tx_payload.drop_if_stale) {
+                LOG_DBG("Dropping interrupted stale msg=%u", m_current_tx_msg_id);
+            } else if (retry_was_superseded_by_newer(m_current_tx_msg_id)) {
+                LOG_DBG("Dropping interrupted superseded msg=%u latest=%u", m_current_tx_msg_id,
+                        m_latest_superseding_msg_id);
+                remove_retry_entry_by_msg_id(m_current_tx_msg_id);
+            } else {
+                m_recovered_tx = m_current_tx_payload;
+                m_recovered_tx.recovery = true;
+                m_recovered_tx_valid = true;
+                LOG_WRN("Recovering interrupted TX msg=%u retry_left=%u",
+                        m_current_tx_msg_id, get_retry_left_by_msg_id(m_current_tx_msg_id));
+            }
+
+            m_current_tx_msg_id = 0;
+            m_current_tx_drop_if_stale = false;
+            m_current_tx_payload_valid = false;
+        }
 
         irq_disable(RADIO_IRQn);
         NVIC_DisableIRQ(RADIO_IRQn);
