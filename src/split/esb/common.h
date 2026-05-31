@@ -119,9 +119,11 @@ int zmk_split_esb_get_item(struct ring_buf *rx_buf, uint8_t *env, size_t env_siz
 /* Relative axes we coalesce: X, Y, WHEEL, HWHEEL. */
 #define ESB_REL_AXES 4
 
-/* Upper bound on accumulated-but-unsent motion per axis, so a long RF outage
- * cannot produce a large cursor jump on recovery. */
-#define ESB_REL_ACCUM_CLAMP 1024
+/* Upper bound on accumulated-but-unsent motion per axis.  Kept small: recovered
+ * motion is released as a single delta, so a large bound would surface as a
+ * cursor jump after congestion.  Motion beyond this is dropped (like a real
+ * mouse dropping a report) rather than hoarded. */
+#define ESB_REL_ACCUM_CLAMP 32
 
 /* Index for a relative axis code, or -1 if not tracked. */
 int zmk_split_esb_rel_axis_index(uint16_t code);

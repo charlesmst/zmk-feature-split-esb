@@ -254,14 +254,18 @@ static int pull_packet_from_tx_msgq(void) {
     static uint8_t que_was_fulled = 0;
 
     if (k_msgq_peek(&m_msgq_tx_payloads, &tx_payload) == 0) {
-        /* Movement-only payloads are sent single-shot (coalesced on the next
-         * pull); everything else keeps the configured retransmit count. */
+        /* Classify only to learn whether this payload carries movement (so the
+         * movement lane is notified when it completes).  Movement is NOT sent
+         * single-shot: this ESB driver does not evict a failed packet from the
+         * TX FIFO, so count=0 lets an un-acked movement packet clog the FIFO and
+         * be retried forever, and app-level resends defeat ESB PID de-dup
+         * (double-applying delivered-but-unacked motion).  Hardware retransmit
+         * gives us de-dup and eviction-on-success; the accumulator still
+         * coalesces and only recovers motion on genuine exhaustion. */
         struct esb_rel_class cls = zmk_split_esb_classify_rel(tx_payload.data, tx_payload.length);
 
         esb_set_retransmit_delay(jittered_retransmit_delay());
-        esb_set_retransmit_count(cls.movement_only
-                                     ? 0
-                                     : CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_COUNT);
+        esb_set_retransmit_count(CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_COUNT);
         ret = esb_write_payload(&tx_payload);
 
         if (ret == -ENOMEM) {
