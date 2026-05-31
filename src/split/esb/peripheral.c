@@ -171,6 +171,19 @@ split_peripheral_esb_report_event(const struct zmk_split_transport_peripheral_ev
         }
     }
 
+    /* Fold any movement lost on a previous (single-shot) send into this one,
+     * so an un-acked delta is recovered on the next movement of the same axis. */
+    struct zmk_split_transport_peripheral_event merged_event;
+    if (event->type == ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT &&
+        event->data.input_event.type == INPUT_EV_REL) {
+        int32_t pending = zmk_split_esb_take_pending_rel(event->data.input_event.code);
+        if (pending != 0) {
+            merged_event = *event;
+            merged_event.data.input_event.value += pending;
+            event = &merged_event;
+        }
+    }
+
     /* Generic path for mouse movement, sensor, and battery events. */
     ssize_t data_size = get_payload_data_size(event);
     if (data_size < 0) {

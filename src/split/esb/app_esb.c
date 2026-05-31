@@ -5,6 +5,7 @@
  */
 
 #include "app_esb.h"
+#include "common.h"
 #include "timeslot.h"
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
@@ -122,6 +123,8 @@ static void event_handler(struct esb_evt const *event) {
         case ESB_EVENT_TX_SUCCESS:
             // LOG_DBG("TX SUCCESS, tx_attempts: %d", event->tx_attempts);
             // LOG_DBG("give d1");
+            // Acked: the payload's movement (if any) was delivered.
+            zmk_split_esb_inflight_resolve(false);
             // Forward an event to the application
             m_event.evt_type = APP_ESB_EVT_TX_SUCCESS;
             m_callback(&m_event);
@@ -130,6 +133,8 @@ static void event_handler(struct esb_evt const *event) {
         case ESB_EVENT_TX_FAILED:
             LOG_WRN("TX FAILED, tx_attempts: %d", event->tx_attempts);
             // esb_flush_tx(); // DOUH, had fixed @ 3.1.0-rc1, not ready yet.
+            // Not acked: fold this payload's lost movement into the next event.
+            zmk_split_esb_inflight_resolve(true);
             // Forward an event to the application
             m_event.evt_type = APP_ESB_EVT_TX_FAIL;
             m_callback(&m_event);
@@ -245,7 +250,15 @@ static int pull_packet_from_tx_msgq(void) {
     static uint8_t que_was_fulled = 0;
 
     if (k_msgq_peek(&m_msgq_tx_payloads, &tx_payload) == 0) {
+        /* Movement-only payloads are sent single-shot and accumulated on loss;
+         * everything else keeps the configured retransmit count. */
+        int32_t deltas[ESB_REL_AXES] = {0};
+        bool movement_only =
+            zmk_split_esb_classify_rel(tx_payload.data, tx_payload.length, deltas);
+
         esb_set_retransmit_delay(jittered_retransmit_delay());
+        esb_set_retransmit_count(movement_only ? 0
+                                               : CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_COUNT);
         ret = esb_write_payload(&tx_payload);
 
         if (ret == -ENOMEM) {
@@ -266,6 +279,9 @@ static int pull_packet_from_tx_msgq(void) {
             que_was_fulled++;
             if (que_was_fulled >= ESB_TX_FIFO_REQUE_MAX) {
                 esb_flush_tx();
+                // Flushed payloads will never get a TX callback; reconcile their
+                // in-flight movement records so the FIFO stays aligned.
+                zmk_split_esb_inflight_reset();
                 // dequeue FIFO msg
                 k_msgq_get(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
             }
@@ -282,6 +298,8 @@ static int pull_packet_from_tx_msgq(void) {
         } else {
             // LOG_DBG("Payload len: %d", tx_payload.length);
             esb_start_tx();
+            // One record per written payload, resolved in TX-callback order.
+            zmk_split_esb_inflight_push(deltas);
             // dequeue FIFO msg
             k_msgq_get(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
             que_was_fulled = 0;
@@ -320,11 +338,7 @@ int zmk_split_esb_send(app_esb_data_t *tx_packet) {
     int ret = 0;
     struct esb_payload tx_payload;
     tx_payload.pipe = 0;
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_ESB_PROTO_TX_ACK)
-    tx_payload.noack = false;
-#else
-    tx_payload.noack = true;
-#endif
+    tx_payload.noack = tx_packet->noack;
     memcpy(tx_payload.data, tx_packet->data, tx_packet->len);
     tx_payload.length = tx_packet->len;
     if (!tx_payload.length) {
@@ -353,6 +367,9 @@ int zmk_split_esb_send(app_esb_data_t *tx_packet) {
 static int app_esb_suspend(void) {
     m_active = false;
     hfxo_release_hold();
+    // ESB is disabled below, dropping any queued TX without callbacks; fold
+    // their outstanding movement into pending so it is re-sent on resume.
+    zmk_split_esb_inflight_reset();
     if(m_mode == APP_ESB_MODE_PTX) {
         uint32_t irq_key = irq_lock();
 

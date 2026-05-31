@@ -99,3 +99,37 @@ void zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state);
 void zmk_split_esb_cb(app_esb_event_t *event, struct zmk_split_esb_async_state *state);
 
 int zmk_split_esb_get_item(struct ring_buf *rx_buf, uint8_t *env, size_t env_size);
+
+/* --- Accumulate-on-loss for relative pointer movement -----------------------
+ *
+ * Mouse movement is sent with ACK but with the ESB retransmit count forced to 0
+ * (single-shot).  A retransmit would re-send a now-stale delta and add latency;
+ * instead, when a movement packet fails its ACK we fold the lost delta into the
+ * next movement event for the same axis.  Key/button state and sensor/battery
+ * events keep the normal ACK + retransmit reliability and are never accumulated.
+ */
+
+/* Relative axes we accumulate: X, Y, WHEEL, HWHEEL. */
+#define ESB_REL_AXES 4
+
+/* Upper bound on a folded-but-not-yet-sent delta, so a long RF outage cannot
+ * produce a large cursor jump on recovery. */
+#define ESB_REL_ACCUM_CLAMP 1024
+
+/* Classify a built TX payload.  Returns true iff every envelope in `buf` is a
+ * relative pointer-movement input event (REL_X/Y/WHEEL/HWHEEL) and there is at
+ * least one.  Such payloads are transmitted single-shot.  When `deltas` is
+ * non-NULL it is filled with the per-axis sum on a true result, or zeroed on a
+ * false result. */
+bool zmk_split_esb_classify_rel(const uint8_t *buf, size_t len, int32_t deltas[ESB_REL_AXES]);
+
+/* In-flight accounting driven from the ESB TX callbacks: exactly one record is
+ * pushed per successfully written payload and resolved in callback order. */
+void zmk_split_esb_inflight_push(const int32_t deltas[ESB_REL_AXES]);
+void zmk_split_esb_inflight_resolve(bool failed);
+/* Treat every outstanding record as lost (flush / timeslot suspend). */
+void zmk_split_esb_inflight_reset(void);
+
+/* Read and clear the accumulated lost delta for a relative axis so it can be
+ * folded into the next outgoing movement.  Returns 0 for untracked codes. */
+int32_t zmk_split_esb_take_pending_rel(uint16_t code);
