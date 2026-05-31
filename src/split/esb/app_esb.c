@@ -253,12 +253,15 @@ static int pull_packet_from_tx_msgq(void) {
         /* Movement-only payloads are sent single-shot and accumulated on loss;
          * everything else keeps the configured retransmit count. */
         int32_t deltas[ESB_REL_AXES] = {0};
-        bool movement_only =
-            zmk_split_esb_classify_rel(tx_payload.data, tx_payload.length, deltas);
+        /* Movement is NOT single-shot: count=0 lets a failed packet clog this
+         * driver's TX FIFO (it only evicts on success) and defeats ESB PID
+         * de-dup, double-applying delivered-but-unacked motion.  Use hardware
+         * retransmit; classify only to capture deltas so a lost movement can be
+         * folded into the next event on genuine retransmit exhaustion. */
+        zmk_split_esb_classify_rel(tx_payload.data, tx_payload.length, deltas);
 
         esb_set_retransmit_delay(jittered_retransmit_delay());
-        esb_set_retransmit_count(movement_only ? 0
-                                               : CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_COUNT);
+        esb_set_retransmit_count(CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_COUNT);
         ret = esb_write_payload(&tx_payload);
 
         if (ret == -ENOMEM) {

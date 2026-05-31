@@ -112,9 +112,9 @@ int zmk_split_esb_get_item(struct ring_buf *rx_buf, uint8_t *env, size_t env_siz
 /* Relative axes we accumulate: X, Y, WHEEL, HWHEEL. */
 #define ESB_REL_AXES 4
 
-/* Upper bound on a folded-but-not-yet-sent delta, so a long RF outage cannot
- * produce a large cursor jump on recovery. */
-#define ESB_REL_ACCUM_CLAMP 1024
+/* Upper bound on a folded-but-not-yet-sent delta, kept small so recovered
+ * motion is released as a small delta rather than a visible cursor jump. */
+#define ESB_REL_ACCUM_CLAMP 32
 
 /* Classify a built TX payload.  Returns true iff every envelope in `buf` is a
  * relative pointer-movement input event (REL_X/Y/WHEEL/HWHEEL) and there is at
