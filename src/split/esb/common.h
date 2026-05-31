@@ -134,18 +134,16 @@ struct esb_rel_class {
 /* Classify a built TX payload by walking its envelopes. */
 struct esb_rel_class zmk_split_esb_classify_rel(const uint8_t *buf, size_t len);
 
-/* Notified (in ESB callback / flush context) when a movement-bearing payload
- * resolves: failed == true means it was not acked / was dropped. */
+/* Notified when the outstanding movement packet should be considered finished:
+ * `failed` == true means it was not delivered (lost ack, dropped, or suspend).
+ *
+ * NOTE: ESB coalesces TX completion flags, so TX events are NOT 1:1 with
+ * payloads and cannot be counted.  This is therefore driven off the radio
+ * becoming idle (whole TX FIFO drained) rather than per-packet correlation,
+ * and the peripheral guards it against spurious calls with its own
+ * mv_outstanding flag + a watchdog. */
 typedef void (*zmk_split_esb_movement_done_cb_t)(bool failed);
 void zmk_split_esb_register_movement_done_cb(zmk_split_esb_movement_done_cb_t cb);
 
-/* In-flight accounting: one record per written payload, resolved in TX-callback
- * order.  A record flagged `movement` fires the movement-done callback when it
- * resolves. */
-void zmk_split_esb_inflight_push(bool movement);
-void zmk_split_esb_inflight_resolve(bool failed);
-/* Treat every outstanding record as failed (flush / timeslot suspend). */
-void zmk_split_esb_inflight_reset(void);
-/* Report a movement payload that was dropped before it was ever written (so it
- * has no in-flight record); fires the movement-done callback with failed. */
-void zmk_split_esb_movement_lost(void);
+/* Fire the registered movement-done callback (no-op if none registered). */
+void zmk_split_esb_movement_complete(bool failed);

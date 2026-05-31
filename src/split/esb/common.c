@@ -81,81 +81,17 @@ struct esb_rel_class zmk_split_esb_classify_rel(const uint8_t *buf, size_t len) 
     return cls;
 }
 
-/* FIFO of per-payload movement flags, one slot per payload written to ESB and
- * not yet acked/failed, resolved in TX-callback order.  Bounded by the ESB TX
- * FIFO depth. */
-#define ESB_INFLIGHT_FIFO_LEN 32
-
-static bool inflight_q[ESB_INFLIGHT_FIFO_LEN];
-static uint8_t inflight_head;
-static uint8_t inflight_tail;
-static uint8_t inflight_count;
-
 static zmk_split_esb_movement_done_cb_t m_movement_done_cb;
 
 void zmk_split_esb_register_movement_done_cb(zmk_split_esb_movement_done_cb_t cb) {
     m_movement_done_cb = cb;
 }
 
-static void notify_movement_done(bool failed) {
+void zmk_split_esb_movement_complete(bool failed) {
     if (m_movement_done_cb) {
         m_movement_done_cb(failed);
     }
 }
-
-void zmk_split_esb_inflight_push(bool movement) {
-    unsigned int key = irq_lock();
-    bool overflow_movement = false;
-    if (inflight_count == ESB_INFLIGHT_FIFO_LEN) {
-        overflow_movement = inflight_q[inflight_head];
-        inflight_head = (inflight_head + 1) % ESB_INFLIGHT_FIFO_LEN;
-        inflight_count--;
-    }
-    inflight_q[inflight_tail] = movement;
-    inflight_tail = (inflight_tail + 1) % ESB_INFLIGHT_FIFO_LEN;
-    inflight_count++;
-    irq_unlock(key);
-
-    if (overflow_movement) {
-        notify_movement_done(true);
-    }
-}
-
-void zmk_split_esb_inflight_resolve(bool failed) {
-    unsigned int key = irq_lock();
-    bool movement = false;
-    bool had = inflight_count > 0;
-    if (had) {
-        movement = inflight_q[inflight_head];
-        inflight_head = (inflight_head + 1) % ESB_INFLIGHT_FIFO_LEN;
-        inflight_count--;
-    }
-    irq_unlock(key);
-
-    if (had && movement) {
-        notify_movement_done(failed);
-    }
-}
-
-void zmk_split_esb_inflight_reset(void) {
-    for (;;) {
-        unsigned int key = irq_lock();
-        if (inflight_count == 0) {
-            irq_unlock(key);
-            break;
-        }
-        bool movement = inflight_q[inflight_head];
-        inflight_head = (inflight_head + 1) % ESB_INFLIGHT_FIFO_LEN;
-        inflight_count--;
-        irq_unlock(key);
-
-        if (movement) {
-            notify_movement_done(true);
-        }
-    }
-}
-
-void zmk_split_esb_movement_lost(void) { notify_movement_done(true); }
 
 void zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state) {
     size_t tx_buf_len = ring_buf_size_get(state->tx_buf);
@@ -193,9 +129,9 @@ void zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state) {
     int sret = zmk_split_esb_send(&my_data); // callback > zmk_split_esb_cb()
     if (sret != 0) {
         /* Not queued (msgq full): the payload is dropped here and will never
-         * get a TX callback, so account for any movement it carried. */
+         * get a TX callback, so release any movement it carried. */
         if (zmk_split_esb_classify_rel(buf, claim_len).contains_movement) {
-            zmk_split_esb_movement_lost();
+            zmk_split_esb_movement_complete(true);
         }
     }
 

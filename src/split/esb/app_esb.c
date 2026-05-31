@@ -123,8 +123,11 @@ static void event_handler(struct esb_evt const *event) {
         case ESB_EVENT_TX_SUCCESS:
             // LOG_DBG("TX SUCCESS, tx_attempts: %d", event->tx_attempts);
             // LOG_DBG("give d1");
-            // Acked: the payload's movement (if any) was delivered.
-            zmk_split_esb_inflight_resolve(false);
+            // TX events coalesce, so they can't be counted; when the radio has
+            // drained its FIFO the outstanding movement packet is delivered.
+            if (esb_is_idle()) {
+                zmk_split_esb_movement_complete(false);
+            }
             // Forward an event to the application
             m_event.evt_type = APP_ESB_EVT_TX_SUCCESS;
             m_callback(&m_event);
@@ -133,8 +136,9 @@ static void event_handler(struct esb_evt const *event) {
         case ESB_EVENT_TX_FAILED:
             LOG_WRN("TX FAILED, tx_attempts: %d", event->tx_attempts);
             // esb_flush_tx(); // DOUH, had fixed @ 3.1.0-rc1, not ready yet.
-            // Not acked: fold this payload's lost movement into the next event.
-            zmk_split_esb_inflight_resolve(true);
+            if (esb_is_idle()) {
+                zmk_split_esb_movement_complete(true);
+            }
             // Forward an event to the application
             m_event.evt_type = APP_ESB_EVT_TX_FAIL;
             m_callback(&m_event);
@@ -278,11 +282,10 @@ static int pull_packet_from_tx_msgq(void) {
             que_was_fulled++;
             if (que_was_fulled >= ESB_TX_FIFO_REQUE_MAX) {
                 esb_flush_tx();
-                // Flushed payloads will never get a TX callback; reconcile their
-                // in-flight records, then account for this never-written one.
-                zmk_split_esb_inflight_reset();
+                // This payload is dropped without ever being sent; release any
+                // movement it carried so the lane is not left stuck.
                 if (cls.contains_movement) {
-                    zmk_split_esb_movement_lost();
+                    zmk_split_esb_movement_complete(true);
                 }
                 // dequeue FIFO msg
                 k_msgq_get(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
@@ -292,7 +295,7 @@ static int pull_packet_from_tx_msgq(void) {
             LOG_WRN("esb_tx_fifo: tx_payload size too large (%d) > CONFIG_ESB_MAX_PAYLOAD_LENGTH (%d)",
                     tx_payload.length, CONFIG_ESB_MAX_PAYLOAD_LENGTH);
             if (cls.contains_movement) {
-                zmk_split_esb_movement_lost();
+                zmk_split_esb_movement_complete(true);
             }
             // dequeue FIFO msg
             k_msgq_get(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
@@ -303,9 +306,6 @@ static int pull_packet_from_tx_msgq(void) {
         } else {
             // LOG_DBG("Payload len: %d", tx_payload.length);
             esb_start_tx();
-            // One record per written payload, resolved in TX-callback order; a
-            // movement-bearing record fires the movement-done callback.
-            zmk_split_esb_inflight_push(cls.contains_movement);
             // dequeue FIFO msg
             k_msgq_get(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
             que_was_fulled = 0;
@@ -373,9 +373,9 @@ int zmk_split_esb_send(app_esb_data_t *tx_packet) {
 static int app_esb_suspend(void) {
     m_active = false;
     hfxo_release_hold();
-    // ESB is disabled below, dropping any queued TX without callbacks; fold
-    // their outstanding movement into pending so it is re-sent on resume.
-    zmk_split_esb_inflight_reset();
+    // ESB is disabled below, dropping any queued TX without callbacks; release
+    // the outstanding movement so it is re-sent on resume.
+    zmk_split_esb_movement_complete(true);
     if(m_mode == APP_ESB_MODE_PTX) {
         uint32_t irq_key = irq_lock();
 

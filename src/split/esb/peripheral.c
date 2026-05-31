@@ -199,6 +199,14 @@ static int32_t mv_inflight[ESB_REL_AXES];
 static bool mv_outstanding;
 static uint8_t mv_reg;
 
+/* Safety net: if a movement packet's completion signal is ever missed (e.g. a
+ * radio edge case), recover the lane after this long rather than stalling. Must
+ * comfortably exceed a normal round trip incl. BLE-shared timeslot gaps. */
+#define MV_WATCHDOG_MS 60
+
+static void mv_watchdog_cb(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(mv_watchdog, mv_watchdog_cb);
+
 static void revert_movement(void) {
     unsigned int key = irq_lock();
     for (int i = 0; i < ESB_REL_AXES; i++) {
@@ -274,7 +282,10 @@ static void maybe_flush_movement(void) {
 
     if (!ok) {
         revert_movement();
+        return;
     }
+    /* Re-arm the watchdog for this outstanding packet. */
+    k_work_reschedule(&mv_watchdog, K_MSEC(MV_WATCHDOG_MS));
 }
 
 static void mv_flush_work_cb(struct k_work *work) { maybe_flush_movement(); }
@@ -285,6 +296,12 @@ static K_WORK_DEFINE(mv_flush_work, mv_flush_work_cb);
  * the next pull is kicked from a thread context. */
 static void movement_done(bool failed) {
     unsigned int key = irq_lock();
+    /* Completion can be signalled spuriously (any idle TX event), so ignore it
+     * unless we actually have a packet outstanding. */
+    if (!mv_outstanding) {
+        irq_unlock(key);
+        return;
+    }
     if (failed) {
         for (int i = 0; i < ESB_REL_AXES; i++) {
             int32_t v = mv_accum[i] + mv_inflight[i];
@@ -296,6 +313,13 @@ static void movement_done(bool failed) {
     irq_unlock(key);
 
     k_work_submit(&mv_flush_work);
+}
+
+static void mv_watchdog_cb(struct k_work *work) {
+    if (mv_outstanding) {
+        LOG_WRN("mv watchdog: completion missed, recovering movement lane");
+        movement_done(true);
+    }
 }
 
 static int
