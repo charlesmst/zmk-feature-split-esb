@@ -100,36 +100,52 @@ void zmk_split_esb_cb(app_esb_event_t *event, struct zmk_split_esb_async_state *
 
 int zmk_split_esb_get_item(struct ring_buf *rx_buf, uint8_t *env, size_t env_size);
 
-/* --- Accumulate-on-loss for relative pointer movement -----------------------
+/* --- Coalesce-on-pull movement transport ------------------------------------
  *
- * Mouse movement is sent with ACK but with the ESB retransmit count forced to 0
- * (single-shot).  A retransmit would re-send a now-stale delta and add latency;
- * instead, when a movement packet fails its ACK we fold the lost delta into the
- * next movement event for the same axis.  Key/button state and sensor/battery
- * events keep the normal ACK + retransmit reliability and are never accumulated.
+ * Like a real polled mouse: rather than queueing one packet per movement
+ * report, the peripheral keeps a single per-axis accumulator and lets at most
+ * ONE movement packet be outstanding at a time.  New motion (and any motion
+ * from a failed packet) just sums into the accumulator; the accumulator is
+ * drained into one fresh packet whenever the radio is free again (the previous
+ * movement packet's TX callback, or a flush/suspend).  Movement is sent with
+ * ACK and retransmit count 0 (single-shot); key/button state and sensor/battery
+ * keep the normal ACK + retransmit reliability.
+ *
+ * This module owns the in-flight bookkeeping (which is generic to the radio);
+ * the per-axis accumulator and packet building live in the peripheral, driven
+ * through the movement-done callback below.
  */
 
-/* Relative axes we accumulate: X, Y, WHEEL, HWHEEL. */
+/* Relative axes we coalesce: X, Y, WHEEL, HWHEEL. */
 #define ESB_REL_AXES 4
 
-/* Upper bound on a folded-but-not-yet-sent delta, so a long RF outage cannot
- * produce a large cursor jump on recovery. */
+/* Upper bound on accumulated-but-unsent motion per axis, so a long RF outage
+ * cannot produce a large cursor jump on recovery. */
 #define ESB_REL_ACCUM_CLAMP 1024
 
-/* Classify a built TX payload.  Returns true iff every envelope in `buf` is a
- * relative pointer-movement input event (REL_X/Y/WHEEL/HWHEEL) and there is at
- * least one.  Such payloads are transmitted single-shot.  When `deltas` is
- * non-NULL it is filled with the per-axis sum on a true result, or zeroed on a
- * false result. */
-bool zmk_split_esb_classify_rel(const uint8_t *buf, size_t len, int32_t deltas[ESB_REL_AXES]);
+/* Index for a relative axis code, or -1 if not tracked. */
+int zmk_split_esb_rel_axis_index(uint16_t code);
 
-/* In-flight accounting driven from the ESB TX callbacks: exactly one record is
- * pushed per successfully written payload and resolved in callback order. */
-void zmk_split_esb_inflight_push(const int32_t deltas[ESB_REL_AXES]);
+struct esb_rel_class {
+    bool movement_only;     /* every envelope is REL movement -> single-shot TX */
+    bool contains_movement; /* >=1 REL movement envelope -> notify movement lane */
+};
+
+/* Classify a built TX payload by walking its envelopes. */
+struct esb_rel_class zmk_split_esb_classify_rel(const uint8_t *buf, size_t len);
+
+/* Notified (in ESB callback / flush context) when a movement-bearing payload
+ * resolves: failed == true means it was not acked / was dropped. */
+typedef void (*zmk_split_esb_movement_done_cb_t)(bool failed);
+void zmk_split_esb_register_movement_done_cb(zmk_split_esb_movement_done_cb_t cb);
+
+/* In-flight accounting: one record per written payload, resolved in TX-callback
+ * order.  A record flagged `movement` fires the movement-done callback when it
+ * resolves. */
+void zmk_split_esb_inflight_push(bool movement);
 void zmk_split_esb_inflight_resolve(bool failed);
-/* Treat every outstanding record as lost (flush / timeslot suspend). */
+/* Treat every outstanding record as failed (flush / timeslot suspend). */
 void zmk_split_esb_inflight_reset(void);
-
-/* Read and clear the accumulated lost delta for a relative axis so it can be
- * folded into the next outgoing movement.  Returns 0 for untracked codes. */
-int32_t zmk_split_esb_take_pending_rel(uint16_t code);
+/* Report a movement payload that was dropped before it was ever written (so it
+ * has no in-flight record); fires the movement-done callback with failed. */
+void zmk_split_esb_movement_lost(void);

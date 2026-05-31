@@ -250,15 +250,14 @@ static int pull_packet_from_tx_msgq(void) {
     static uint8_t que_was_fulled = 0;
 
     if (k_msgq_peek(&m_msgq_tx_payloads, &tx_payload) == 0) {
-        /* Movement-only payloads are sent single-shot and accumulated on loss;
-         * everything else keeps the configured retransmit count. */
-        int32_t deltas[ESB_REL_AXES] = {0};
-        bool movement_only =
-            zmk_split_esb_classify_rel(tx_payload.data, tx_payload.length, deltas);
+        /* Movement-only payloads are sent single-shot (coalesced on the next
+         * pull); everything else keeps the configured retransmit count. */
+        struct esb_rel_class cls = zmk_split_esb_classify_rel(tx_payload.data, tx_payload.length);
 
         esb_set_retransmit_delay(jittered_retransmit_delay());
-        esb_set_retransmit_count(movement_only ? 0
-                                               : CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_COUNT);
+        esb_set_retransmit_count(cls.movement_only
+                                     ? 0
+                                     : CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_COUNT);
         ret = esb_write_payload(&tx_payload);
 
         if (ret == -ENOMEM) {
@@ -280,8 +279,11 @@ static int pull_packet_from_tx_msgq(void) {
             if (que_was_fulled >= ESB_TX_FIFO_REQUE_MAX) {
                 esb_flush_tx();
                 // Flushed payloads will never get a TX callback; reconcile their
-                // in-flight movement records so the FIFO stays aligned.
+                // in-flight records, then account for this never-written one.
                 zmk_split_esb_inflight_reset();
+                if (cls.contains_movement) {
+                    zmk_split_esb_movement_lost();
+                }
                 // dequeue FIFO msg
                 k_msgq_get(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
             }
@@ -289,6 +291,9 @@ static int pull_packet_from_tx_msgq(void) {
         } else if (ret == -EMSGSIZE) {
             LOG_WRN("esb_tx_fifo: tx_payload size too large (%d) > CONFIG_ESB_MAX_PAYLOAD_LENGTH (%d)",
                     tx_payload.length, CONFIG_ESB_MAX_PAYLOAD_LENGTH);
+            if (cls.contains_movement) {
+                zmk_split_esb_movement_lost();
+            }
             // dequeue FIFO msg
             k_msgq_get(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
 
@@ -298,8 +303,9 @@ static int pull_packet_from_tx_msgq(void) {
         } else {
             // LOG_DBG("Payload len: %d", tx_payload.length);
             esb_start_tx();
-            // One record per written payload, resolved in TX-callback order.
-            zmk_split_esb_inflight_push(deltas);
+            // One record per written payload, resolved in TX-callback order; a
+            // movement-bearing record fires the movement-done callback.
+            zmk_split_esb_inflight_push(cls.contains_movement);
             // dequeue FIFO msg
             k_msgq_get(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
             que_was_fulled = 0;

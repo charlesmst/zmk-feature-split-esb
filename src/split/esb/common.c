@@ -17,7 +17,7 @@
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_SPLIT_ESB_LOG_LEVEL);
 
-static int rel_axis_index(uint16_t code) {
+int zmk_split_esb_rel_axis_index(uint16_t code) {
     switch (code) {
     case INPUT_REL_X:
         return 0;
@@ -32,11 +32,11 @@ static int rel_axis_index(uint16_t code) {
     }
 }
 
-bool zmk_split_esb_classify_rel(const uint8_t *buf, size_t len, int32_t deltas[ESB_REL_AXES]) {
-    int32_t acc[ESB_REL_AXES] = {0};
+struct esb_rel_class zmk_split_esb_classify_rel(const uint8_t *buf, size_t len) {
+    struct esb_rel_class cls = {.movement_only = false, .contains_movement = false};
     size_t off = 0;
     bool any = false;
-    bool movement_only = true;
+    bool only = true;
 
     while (off + sizeof(struct esb_msg_prefix) <= len) {
         struct esb_msg_prefix prefix;
@@ -44,127 +44,118 @@ bool zmk_split_esb_classify_rel(const uint8_t *buf, size_t len, int32_t deltas[E
 
         if (memcmp(prefix.magic_prefix, ZMK_SPLIT_ESB_ENVELOPE_MAGIC_PREFIX,
                    sizeof(prefix.magic_prefix)) != 0) {
-            movement_only = false;
+            only = false;
             break;
         }
 
         size_t env_len = sizeof(struct esb_msg_prefix) + prefix.payload_size;
         if (off + env_len + sizeof(struct esb_msg_postfix) > len) {
-            movement_only = false;
+            only = false;
             break;
         }
 
         /* KEY_STATE packets carry the discriminant in the high bit of source. */
         uint8_t source = buf[off + sizeof(struct esb_msg_prefix)];
-        if ((source & ESB_SOURCE_KEY_STATE_FLAG) != 0) {
-            movement_only = false;
-            break;
+        bool is_movement = false;
+        if ((source & ESB_SOURCE_KEY_STATE_FLAG) == 0) {
+            struct esb_event_envelope env;
+            memset(&env, 0, sizeof(env));
+            memcpy(&env, &buf[off], MIN(env_len, sizeof(env)));
+
+            is_movement =
+                env.payload.event.type == ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT &&
+                env.payload.event.data.input_event.type == INPUT_EV_REL &&
+                zmk_split_esb_rel_axis_index(env.payload.event.data.input_event.code) >= 0;
         }
 
-        struct esb_event_envelope env;
-        memset(&env, 0, sizeof(env));
-        memcpy(&env, &buf[off], MIN(env_len, sizeof(env)));
-
-        if (env.payload.event.type != ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT ||
-            env.payload.event.data.input_event.type != INPUT_EV_REL) {
-            movement_only = false;
-            break;
+        if (is_movement) {
+            cls.contains_movement = true;
+        } else {
+            only = false;
         }
-
-        int idx = rel_axis_index(env.payload.event.data.input_event.code);
-        if (idx < 0) {
-            movement_only = false;
-            break;
-        }
-
-        acc[idx] += env.payload.event.data.input_event.value;
         any = true;
         off += env_len + sizeof(struct esb_msg_postfix);
     }
 
-    movement_only = movement_only && any && (off == len);
-
-    if (deltas) {
-        if (movement_only) {
-            memcpy(deltas, acc, sizeof(acc));
-        } else {
-            memset(deltas, 0, sizeof(int32_t) * ESB_REL_AXES);
-        }
-    }
-    return movement_only;
+    cls.movement_only = only && any && (off == len);
+    return cls;
 }
 
-/* FIFO of per-payload movement deltas, one slot per payload written to ESB and
- * not yet acked/failed.  Bounded by the ESB TX FIFO depth; on the (unexpected)
- * overflow the oldest is reconciled as lost rather than dropped. */
+/* FIFO of per-payload movement flags, one slot per payload written to ESB and
+ * not yet acked/failed, resolved in TX-callback order.  Bounded by the ESB TX
+ * FIFO depth. */
 #define ESB_INFLIGHT_FIFO_LEN 32
 
-static struct {
-    int32_t d[ESB_REL_AXES];
-} inflight_q[ESB_INFLIGHT_FIFO_LEN];
+static bool inflight_q[ESB_INFLIGHT_FIFO_LEN];
 static uint8_t inflight_head;
 static uint8_t inflight_tail;
 static uint8_t inflight_count;
 
-/* Accumulated lost movement awaiting merge into the next movement event. */
-static int32_t pending_rel[ESB_REL_AXES];
+static zmk_split_esb_movement_done_cb_t m_movement_done_cb;
 
-static void fold_into_pending(const int32_t d[ESB_REL_AXES]) {
-    for (int i = 0; i < ESB_REL_AXES; i++) {
-        int32_t v = pending_rel[i] + d[i];
-        v = CLAMP(v, -ESB_REL_ACCUM_CLAMP, ESB_REL_ACCUM_CLAMP);
-        pending_rel[i] = v;
+void zmk_split_esb_register_movement_done_cb(zmk_split_esb_movement_done_cb_t cb) {
+    m_movement_done_cb = cb;
+}
+
+static void notify_movement_done(bool failed) {
+    if (m_movement_done_cb) {
+        m_movement_done_cb(failed);
     }
 }
 
-void zmk_split_esb_inflight_push(const int32_t deltas[ESB_REL_AXES]) {
+void zmk_split_esb_inflight_push(bool movement) {
     unsigned int key = irq_lock();
+    bool overflow_movement = false;
     if (inflight_count == ESB_INFLIGHT_FIFO_LEN) {
-        fold_into_pending(inflight_q[inflight_head].d);
+        overflow_movement = inflight_q[inflight_head];
         inflight_head = (inflight_head + 1) % ESB_INFLIGHT_FIFO_LEN;
         inflight_count--;
     }
-    memcpy(inflight_q[inflight_tail].d, deltas, sizeof(int32_t) * ESB_REL_AXES);
+    inflight_q[inflight_tail] = movement;
     inflight_tail = (inflight_tail + 1) % ESB_INFLIGHT_FIFO_LEN;
     inflight_count++;
     irq_unlock(key);
+
+    if (overflow_movement) {
+        notify_movement_done(true);
+    }
 }
 
 void zmk_split_esb_inflight_resolve(bool failed) {
     unsigned int key = irq_lock();
-    if (inflight_count == 0) {
-        irq_unlock(key);
-        return;
-    }
-    if (failed) {
-        fold_into_pending(inflight_q[inflight_head].d);
-    }
-    inflight_head = (inflight_head + 1) % ESB_INFLIGHT_FIFO_LEN;
-    inflight_count--;
-    irq_unlock(key);
-}
-
-void zmk_split_esb_inflight_reset(void) {
-    unsigned int key = irq_lock();
-    while (inflight_count > 0) {
-        fold_into_pending(inflight_q[inflight_head].d);
+    bool movement = false;
+    bool had = inflight_count > 0;
+    if (had) {
+        movement = inflight_q[inflight_head];
         inflight_head = (inflight_head + 1) % ESB_INFLIGHT_FIFO_LEN;
         inflight_count--;
     }
     irq_unlock(key);
+
+    if (had && movement) {
+        notify_movement_done(failed);
+    }
 }
 
-int32_t zmk_split_esb_take_pending_rel(uint16_t code) {
-    int idx = rel_axis_index(code);
-    if (idx < 0) {
-        return 0;
+void zmk_split_esb_inflight_reset(void) {
+    for (;;) {
+        unsigned int key = irq_lock();
+        if (inflight_count == 0) {
+            irq_unlock(key);
+            break;
+        }
+        bool movement = inflight_q[inflight_head];
+        inflight_head = (inflight_head + 1) % ESB_INFLIGHT_FIFO_LEN;
+        inflight_count--;
+        irq_unlock(key);
+
+        if (movement) {
+            notify_movement_done(true);
+        }
     }
-    unsigned int key = irq_lock();
-    int32_t v = pending_rel[idx];
-    pending_rel[idx] = 0;
-    irq_unlock(key);
-    return v;
 }
+
+void zmk_split_esb_movement_lost(void) { notify_movement_done(true); }
 
 void zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state) {
     size_t tx_buf_len = ring_buf_size_get(state->tx_buf);
@@ -199,7 +190,14 @@ void zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state) {
      * decision (single-shot for movement vs. retransmit for the rest) is made
      * at write time in pull_packet_from_tx_msgq(). */
     my_data.noack = !IS_ENABLED(CONFIG_ZMK_SPLIT_ESB_PROTO_TX_ACK);
-    zmk_split_esb_send(&my_data); // callback > zmk_split_esb_cb()
+    int sret = zmk_split_esb_send(&my_data); // callback > zmk_split_esb_cb()
+    if (sret != 0) {
+        /* Not queued (msgq full): the payload is dropped here and will never
+         * get a TX callback, so account for any movement it carried. */
+        if (zmk_split_esb_classify_rel(buf, claim_len).contains_movement) {
+            zmk_split_esb_movement_lost();
+        }
+    }
 
     // LOG_DBG("ESB TX Buf finish %d", claim_len);
     ring_buf_get_finish(state->tx_buf, claim_len);
