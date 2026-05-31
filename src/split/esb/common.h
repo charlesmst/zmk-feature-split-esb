@@ -71,7 +71,19 @@ struct esb_msg_postfix {
     uint32_t crc;
 } __packed;
 
-#define ESB_MSG_EXTRA_SIZE (sizeof(struct esb_msg_prefix) + sizeof(struct esb_msg_postfix))
+enum esb_msg_meta_flags {
+    ESB_MSG_META_DROP_IF_STALE = BIT(0),
+    ESB_MSG_META_SUPERSEDED_BY_NEWER = BIT(1),
+};
+
+struct esb_msg_meta {
+    uint16_t message_id;
+    uint8_t max_retry;
+    uint8_t flags;
+} __packed;
+
+#define ESB_MSG_RX_EXTRA_SIZE (sizeof(struct esb_msg_prefix) + sizeof(struct esb_msg_postfix))
+#define ESB_MSG_EXTRA_SIZE (ESB_MSG_RX_EXTRA_SIZE + sizeof(struct esb_msg_meta))
 
 typedef void (*zmk_split_esb_process_tx_callback_t)(void);
 

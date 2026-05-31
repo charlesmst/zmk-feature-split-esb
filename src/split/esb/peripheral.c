@@ -32,7 +32,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_SPLIT_ESB_LOG_LEVEL);
 #include "common.h"
 
 #define TX_BUFFER_SIZE                                                                             \
-    ((sizeof(struct esb_event_envelope) + sizeof(struct esb_msg_postfix)) *                        \
+    ((sizeof(struct esb_event_envelope) + sizeof(struct esb_msg_postfix) +                         \
+      sizeof(struct esb_msg_meta)) *                                                               \
      CONFIG_ZMK_SPLIT_ESB_EVENT_BUFFER_ITEMS)
 #define RX_BUFFER_SIZE                                                                             \
     ((sizeof(struct esb_command_envelope) + sizeof(struct esb_msg_postfix)) *                      \
@@ -43,6 +44,7 @@ RING_BUF_DECLARE(chosen_tx_buf, TX_BUFFER_SIZE);
 
 static K_SEM_DEFINE(esb_send_evt_sem, 1, 1);
 
+static uint16_t message_id;
 static const uint8_t peripheral_id = CONFIG_ZMK_SPLIT_ESB_PERIPHERAL_ID;
 
 /* Pressed-key bitmap, mirroring the BLE split's position_state[]. */
@@ -71,6 +73,22 @@ static struct zmk_split_esb_async_state async_state = {
 
 static void begin_tx(void) {
     zmk_split_esb_async_tx(&async_state);
+}
+
+static void put_meta(uint8_t max_retry, uint8_t flags) {
+    if (++message_id == 0) {
+        message_id = 1;
+    }
+
+    struct esb_msg_meta meta = {
+        .message_id = message_id,
+        .max_retry = max_retry,
+        .flags = flags,
+    };
+    size_t put = ring_buf_put(&chosen_tx_buf, (uint8_t *)&meta, sizeof(meta));
+    if (put != sizeof(meta)) {
+        LOG_WRN("Failed to put event meta (%d vs %d)", put, sizeof(meta));
+    }
 }
 
 void zmk_split_esb_on_ptx_esb_callback(app_esb_event_t *event) {
@@ -134,8 +152,33 @@ static int send_position_state(void) {
         LOG_WRN("Failed to put key state postfix (%d vs %d)", put, sizeof(postfix));
     }
 
+    put_meta(CONFIG_ZMK_SPLIT_ESB_RETRY_KEY_POSITION, ESB_MSG_META_SUPERSEDED_BY_NEWER);
+
     begin_tx();
     k_sem_give(&esb_send_evt_sem);
+    return 0;
+}
+
+static uint8_t get_retry_count(const struct zmk_split_transport_peripheral_event *evt) {
+    switch (evt->type) {
+    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT:
+        return CONFIG_ZMK_SPLIT_ESB_RETRY_INPUT_EVENT;
+    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_KEY_POSITION_EVENT:
+        return CONFIG_ZMK_SPLIT_ESB_RETRY_KEY_POSITION;
+    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_SENSOR_EVENT:
+        return CONFIG_ZMK_SPLIT_ESB_RETRY_SENSOR_EVENT;
+    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_BATTERY_EVENT:
+        return CONFIG_ZMK_SPLIT_ESB_RETRY_BATTERY_EVENT;
+    default:
+        return 0;
+    }
+}
+
+static uint8_t get_meta_flags(const struct zmk_split_transport_peripheral_event *evt) {
+    if (evt->type == ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT) {
+        return ESB_MSG_META_DROP_IF_STALE;
+    }
+
     return 0;
 }
 
@@ -219,6 +262,8 @@ split_peripheral_esb_report_event(const struct zmk_split_transport_peripheral_ev
         LOG_WRN("Failed to put event postfix (%d vs %d)", put, sizeof(postfix));
     }
 
+    put_meta(get_retry_count(event), get_meta_flags(event));
+
     begin_tx();
     k_sem_give(&esb_send_evt_sem);
     return 0;
@@ -279,7 +324,7 @@ static int zmk_split_esb_peripheral_init(void) {
 SYS_INIT(zmk_split_esb_peripheral_init, APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
 
 static void process_tx_cb(void) {
-    while (ring_buf_size_get(&chosen_rx_buf) > ESB_MSG_EXTRA_SIZE) {
+    while (ring_buf_size_get(&chosen_rx_buf) > ESB_MSG_RX_EXTRA_SIZE) {
         struct esb_command_envelope env;
         int item_err = zmk_split_esb_get_item(&chosen_rx_buf, (uint8_t *)&env,
                                                 sizeof(struct esb_command_envelope));

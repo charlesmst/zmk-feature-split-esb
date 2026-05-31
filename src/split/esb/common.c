@@ -6,6 +6,7 @@
 
 #include "common.h"
 
+#include <string.h>
 #include <zephyr/sys/crc.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/gpio.h>
@@ -17,16 +18,42 @@ void zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state) {
     size_t tx_buf_len = ring_buf_size_get(state->tx_buf);
     // LOG_DBG("tx_buf_len %u, CONFIG_ESB_MAX_PAYLOAD_LENGTH %u", 
     //         tx_buf_len, CONFIG_ESB_MAX_PAYLOAD_LENGTH);
-    if (!tx_buf_len || tx_buf_len > CONFIG_ESB_MAX_PAYLOAD_LENGTH) {
+    if (!tx_buf_len || tx_buf_len < ESB_MSG_EXTRA_SIZE) {
         return;
     }
-    // LOG_DBG("tx_buf_len %d", tx_buf_len);
+
+    struct esb_msg_prefix prefix;
+    __ASSERT_EVAL((void)ring_buf_peek(state->tx_buf, (uint8_t *)&prefix, sizeof(prefix)),
+                  uint32_t peek_read =
+                      ring_buf_peek(state->tx_buf, (uint8_t *)&prefix, sizeof(prefix)),
+                  peek_read == sizeof(prefix),
+                  "Somehow read less than we expect from the TX buffer");
+
+    if (memcmp(&prefix.magic_prefix, &ZMK_SPLIT_ESB_ENVELOPE_MAGIC_PREFIX,
+               sizeof(prefix.magic_prefix)) != 0) {
+        uint8_t discarded_byte;
+        ring_buf_get(state->tx_buf, &discarded_byte, 1);
+        LOG_WRN("TX prefix mismatch, discarding byte %0x", discarded_byte);
+        return;
+    }
+
+    size_t item_len = sizeof(prefix) + prefix.payload_size + sizeof(struct esb_msg_postfix) +
+                      sizeof(struct esb_msg_meta);
+    if (item_len > CONFIG_ESB_MAX_PAYLOAD_LENGTH) {
+        LOG_WRN("TX item too large %d > %d", item_len, CONFIG_ESB_MAX_PAYLOAD_LENGTH);
+        ring_buf_reset(state->tx_buf);
+        return;
+    }
+
+    if (tx_buf_len < item_len) {
+        return;
+    }
 
     uint8_t buf[CONFIG_ESB_MAX_PAYLOAD_LENGTH];
     size_t claim_len = 0;
-    while (claim_len < tx_buf_len) {
+    while (claim_len < item_len) {
         uint8_t *b;
-        uint32_t buf_len = ring_buf_get_claim(state->tx_buf, &b, tx_buf_len - claim_len);
+        uint32_t buf_len = ring_buf_get_claim(state->tx_buf, &b, item_len - claim_len);
         if (buf_len <= 0) {
             break;
         }
@@ -39,10 +66,19 @@ void zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state) {
     // LOG_DBG("tx_buf_len: %d, claim_len: %d", tx_buf_len, claim_len);
     // LOG_HEXDUMP_DBG(buf, claim_len, "buf");
 
-    static app_esb_data_t my_data;
-    my_data.data = buf;
-    my_data.len = claim_len;
-    zmk_split_esb_send(&my_data); // callback > zmk_split_esb_cb()
+    size_t meta_offset = claim_len - sizeof(struct esb_msg_meta);
+    struct esb_msg_meta meta;
+    memcpy(&meta, &buf[meta_offset], sizeof(meta));
+
+    app_esb_data_t tx_data = {
+        .data = buf,
+        .len = meta_offset,
+        .message_id = meta.message_id,
+        .max_retry = meta.max_retry,
+        .drop_if_stale = (meta.flags & ESB_MSG_META_DROP_IF_STALE) != 0,
+        .superseded_by_newer = (meta.flags & ESB_MSG_META_SUPERSEDED_BY_NEWER) != 0,
+    };
+    zmk_split_esb_send(&tx_data); // callback > zmk_split_esb_cb()
 
     // LOG_DBG("ESB TX Buf finish %d", claim_len);
     ring_buf_get_finish(state->tx_buf, claim_len);
@@ -107,7 +143,7 @@ void zmk_split_esb_cb(app_esb_event_t *event, struct zmk_split_esb_async_state *
 }
 
 int zmk_split_esb_get_item(struct ring_buf *rx_buf, uint8_t *env, size_t env_size) {
-    while (ring_buf_size_get(rx_buf) > sizeof(struct esb_msg_prefix) + sizeof(struct esb_msg_postfix)) {
+    while (ring_buf_size_get(rx_buf) > ESB_MSG_RX_EXTRA_SIZE) {
         struct esb_msg_prefix prefix;
 
         __ASSERT_EVAL(

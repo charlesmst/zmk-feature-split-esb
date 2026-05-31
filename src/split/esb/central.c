@@ -35,13 +35,16 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_SPLIT_ESB_LOG_LEVEL);
     ((sizeof(struct esb_event_envelope) + sizeof(struct esb_msg_postfix)) *                        \
      CONFIG_ZMK_SPLIT_ESB_EVENT_BUFFER_ITEMS)
 #define TX_BUFFER_SIZE                                                                             \
-    ((sizeof(struct esb_command_envelope) + sizeof(struct esb_msg_postfix)) *                      \
+    ((sizeof(struct esb_command_envelope) + sizeof(struct esb_msg_postfix) +                       \
+      sizeof(struct esb_msg_meta)) *                                                               \
      CONFIG_ZMK_SPLIT_ESB_CMD_BUFFER_ITEMS)
 
 RING_BUF_DECLARE(rx_buf, RX_BUFFER_SIZE);
 RING_BUF_DECLARE(tx_buf, TX_BUFFER_SIZE);
 
 static K_SEM_DEFINE(esb_send_cmd_sem, 1, 1);
+
+static uint16_t cmd_message_id;
 
 static void publish_events_work(struct k_work *work);
 
@@ -53,13 +56,29 @@ static struct zmk_split_esb_async_state async_state = {
     .process_tx_work = &publish_events,
     .rx_bufs = {async_rx_buf[0], async_rx_buf[1]},
     .rx_bufs_len = RX_BUFFER_SIZE / 2,
-    .rx_size_process_trigger = ESB_MSG_EXTRA_SIZE + 1,
+    .rx_size_process_trigger = ESB_MSG_RX_EXTRA_SIZE + 1,
     .rx_buf = &rx_buf,
     .tx_buf = &tx_buf,
 };
 
 static void begin_tx(void) {
     zmk_split_esb_async_tx(&async_state);
+}
+
+static void put_meta(uint8_t max_retry) {
+    if (++cmd_message_id == 0) {
+        cmd_message_id = 1;
+    }
+
+    struct esb_msg_meta meta = {
+        .message_id = cmd_message_id,
+        .max_retry = max_retry,
+        .flags = 0,
+    };
+    size_t put = ring_buf_put(&tx_buf, (uint8_t *)&meta, sizeof(meta));
+    if (put != sizeof(meta)) {
+        LOG_WRN("Failed to put command meta (%d vs %d)", put, sizeof(meta));
+    }
 }
 
 static ssize_t get_payload_data_size(const struct zmk_split_transport_central_command *cmd) {
@@ -130,6 +149,8 @@ static int split_central_esb_send_command(uint8_t source,
     if (put != sizeof(postfix)) {
         LOG_WRN("Failed to put the postfix (%d vs %d)", put, sizeof(postfix));
     }
+
+    put_meta(CONFIG_ZMK_SPLIT_ESB_RETRY_CMD);
 
     begin_tx();
 
@@ -255,7 +276,7 @@ static void publish_events_work(struct k_work *work) {
         struct esb_key_state_envelope key_state_env;
     } env_buf;
 
-    while (ring_buf_size_get(&rx_buf) > ESB_MSG_EXTRA_SIZE) {
+    while (ring_buf_size_get(&rx_buf) > ESB_MSG_RX_EXTRA_SIZE) {
         int item_err =
             zmk_split_esb_get_item(&rx_buf, (uint8_t *)&env_buf, sizeof(env_buf));
         switch (item_err) {
