@@ -54,13 +54,15 @@ void zmk_split_esb_cb(app_esb_event_t *event, struct zmk_split_esb_async_state *
     switch(event->evt_type) {
         case APP_ESB_EVT_TX_SUCCESS:
             // LOG_DBG("ESB TX sent");
-            if (!ring_buf_is_empty(state->tx_buf)) {
+            if (!ring_buf_is_empty(state->tx_buf) &&
+                (!state->tx_allowed_callback || state->tx_allowed_callback())) {
                 zmk_split_esb_async_tx(state);
             }
             break;
         case APP_ESB_EVT_TX_FAIL:
             // LOG_WRN("ESB TX failed");
-            if (!ring_buf_is_empty(state->tx_buf)) {
+            if (!ring_buf_is_empty(state->tx_buf) &&
+                (!state->tx_allowed_callback || state->tx_allowed_callback())) {
                 zmk_split_esb_async_tx(state);
             }
             break;

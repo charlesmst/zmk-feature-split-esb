@@ -36,12 +36,12 @@ LOG_MODULE_REGISTER(app_esb, CONFIG_ZMK_SPLIT_ESB_LOG_LEVEL);
 #endif
 
 #if (!HAS_ADDR_PREFIX || ADDR_PREFIX_LEN != 8)
-#error "zmk,esb-split :: base-addr-0 must include 8 bytes"
+#error "zmk,esb-split :: addr-prefix must include 8 bytes"
 #endif
 
 uint8_t esb_base_addr_0[4] = DT_INST_PROP(0, base_addr_0);
 uint8_t esb_base_addr_1[4] = DT_INST_PROP(0, base_addr_1);
-uint8_t esb_addr_prefix[4] = DT_INST_PROP(0, addr_prefix);
+uint8_t esb_addr_prefix[8] = DT_INST_PROP(0, addr_prefix);
 
 #else
 #error "Need to create a node with compatible of 'zmk,esb-split` with `all `address` property set."
@@ -57,25 +57,38 @@ static app_esb_mode_t m_mode;
 static bool m_active = false;
 static bool m_enabled = false;
 
-/* --- Option 5: jitter retransmit delay ±12.5% --- */
-static uint32_t m_jitter_rng;
+static uint16_t configured_retransmit_delay(void) {
+    uint32_t delay = CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_DELAY;
 
-static uint16_t jittered_retransmit_delay(void) {
-    if (m_jitter_rng == 0) {
-        uint32_t seed = k_uptime_get_32() ^ (k_cycle_get_32() * 2654435761u);
-        m_jitter_rng = seed ? seed : 0xA3C59B1Du;
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_ESB_PERIPHERAL_TDMA)
+    if (m_mode == APP_ESB_MODE_PTX) {
+        uint32_t window_us = CONFIG_ZMK_SPLIT_ESB_TDMA_SLOT_US;
+
+        if (CONFIG_ZMK_SPLIT_ESB_PERIPHERAL_ID ==
+            CONFIG_ZMK_SPLIT_ESB_TDMA_MOUSE_PERIPHERAL_ID) {
+            window_us = CONFIG_ZMK_SPLIT_ESB_TDMA_MOUSE_SLOT_US;
+        }
+
+        if (CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_COUNT > 0 && window_us > 0) {
+            uint32_t bounded_delay =
+                window_us / (CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_COUNT + 1);
+
+            if (bounded_delay < 50) {
+                bounded_delay = 50;
+            }
+
+            if (delay > bounded_delay) {
+                delay = bounded_delay;
+            }
+        }
     }
-    m_jitter_rng ^= m_jitter_rng << 13;
-    m_jitter_rng ^= m_jitter_rng >> 17;
-    m_jitter_rng ^= m_jitter_rng << 5;
-    const uint32_t base = CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_DELAY;
-    const uint32_t span = base >> 3; /* 12.5% */
-    const int8_t off = (int8_t)(m_jitter_rng & 0xFFu);
-    const int32_t delta = ((int32_t)span * off) / 128;
-    int32_t d = (int32_t)base + delta;
-    if (d < 100) d = 100;
-    if (d > UINT16_MAX) d = UINT16_MAX;
-    return (uint16_t)d;
+#endif
+
+    if (delay > UINT16_MAX) {
+        delay = UINT16_MAX;
+    }
+
+    return (uint16_t)delay;
 }
 
 /* --- Option 7: HFXO persistent hold per ESB session --- */
@@ -245,7 +258,7 @@ static int pull_packet_from_tx_msgq(void) {
     static uint8_t que_was_fulled = 0;
 
     if (k_msgq_peek(&m_msgq_tx_payloads, &tx_payload) == 0) {
-        esb_set_retransmit_delay(jittered_retransmit_delay());
+        esb_set_retransmit_delay(configured_retransmit_delay());
         ret = esb_write_payload(&tx_payload);
 
         if (ret == -ENOMEM) {

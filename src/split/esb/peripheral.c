@@ -37,6 +37,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_SPLIT_ESB_LOG_LEVEL);
 #define RX_BUFFER_SIZE                                                                             \
     ((sizeof(struct esb_command_envelope) + sizeof(struct esb_msg_postfix)) *                      \
      CONFIG_ZMK_SPLIT_ESB_CMD_BUFFER_ITEMS)
+#define TDMA_WINDOW_TX_GUARD_US 50
 
 RING_BUF_DECLARE(chosen_rx_buf, RX_BUFFER_SIZE);
 RING_BUF_DECLARE(chosen_tx_buf, TX_BUFFER_SIZE);
@@ -56,6 +57,9 @@ static void publish_commands_work(struct k_work *work);
 K_WORK_DEFINE(publish_commands, publish_commands_work);
 
 static void process_tx_cb(void);
+static void begin_tx(void);
+static void tx_window_work_cb(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(tx_window_work, tx_window_work_cb);
 K_MSGQ_DEFINE(cmd_msg_queue, sizeof(struct zmk_split_transport_central_command), 3, 4);
 
 uint8_t async_rx_buf[RX_BUFFER_SIZE / 2][2];
@@ -65,11 +69,91 @@ static struct zmk_split_esb_async_state async_state = {
     .rx_bufs_len = RX_BUFFER_SIZE / 2,
     .rx_size_process_trigger = sizeof(struct esb_command_envelope),
     .process_tx_callback = process_tx_cb,
+    .tx_allowed_callback = NULL,
     .rx_buf = &chosen_rx_buf,
     .tx_buf = &chosen_tx_buf,
 };
 
+struct tdma_window_state {
+    uint32_t delay_us;
+    uint32_t remaining_us;
+};
+
+static struct tdma_window_state tdma_window_get_state(void) {
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_ESB_PERIPHERAL_TDMA)
+    const uint32_t frame_us = CONFIG_ZMK_SPLIT_ESB_TDMA_FRAME_US;
+    const uint32_t normal_slot_us = CONFIG_ZMK_SPLIT_ESB_TDMA_SLOT_US;
+    uint32_t window_us = normal_slot_us;
+    uint32_t start_us;
+
+    if (frame_us == 0 || normal_slot_us == 0) {
+        return (struct tdma_window_state){.delay_us = 0, .remaining_us = UINT32_MAX};
+    }
+
+    uint32_t mouse_slot_us = CONFIG_ZMK_SPLIT_ESB_TDMA_MOUSE_SLOT_US;
+    if (mouse_slot_us > frame_us) {
+        mouse_slot_us = frame_us;
+    }
+
+    if (peripheral_id == CONFIG_ZMK_SPLIT_ESB_TDMA_MOUSE_PERIPHERAL_ID) {
+        window_us = mouse_slot_us;
+        start_us = frame_us - mouse_slot_us;
+    } else {
+        const uint32_t non_mouse_us = frame_us > mouse_slot_us ? frame_us - mouse_slot_us : frame_us;
+        uint32_t normal_slots = non_mouse_us / normal_slot_us;
+        if (normal_slots == 0) {
+            normal_slots = 1;
+        }
+
+        uint32_t slot_index = peripheral_id > 0 ? peripheral_id - 1 : 0;
+        slot_index %= normal_slots;
+        start_us = slot_index * normal_slot_us;
+        if (start_us + window_us > frame_us) {
+            window_us = frame_us - start_us;
+        }
+    }
+
+    uint32_t offset_us = k_cyc_to_us_floor32(k_cycle_get_32()) % frame_us;
+    if (offset_us >= start_us && offset_us < start_us + window_us) {
+        return (struct tdma_window_state){
+            .delay_us = 0,
+            .remaining_us = start_us + window_us - offset_us,
+        };
+    }
+
+    if (offset_us < start_us) {
+        return (struct tdma_window_state){.delay_us = start_us - offset_us};
+    }
+
+    return (struct tdma_window_state){.delay_us = frame_us - offset_us + start_us};
+#else
+    return (struct tdma_window_state){.delay_us = 0, .remaining_us = UINT32_MAX};
+#endif
+}
+
+static bool tx_allowed_now(void) {
+    return tdma_window_get_state().remaining_us > TDMA_WINDOW_TX_GUARD_US;
+}
+
+static void tx_window_work_cb(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    if (!ring_buf_is_empty(&chosen_tx_buf)) {
+        begin_tx();
+    }
+}
+
 static void begin_tx(void) {
+    struct tdma_window_state window = tdma_window_get_state();
+    if (window.delay_us > 0) {
+        k_work_reschedule(&tx_window_work, K_USEC(window.delay_us));
+        return;
+    }
+    if (window.remaining_us <= TDMA_WINDOW_TX_GUARD_US) {
+        k_work_reschedule(&tx_window_work, K_USEC(TDMA_WINDOW_TX_GUARD_US));
+        return;
+    }
+
     zmk_split_esb_async_tx(&async_state);
 }
 
@@ -267,6 +351,8 @@ static void notify_status_work_cb(struct k_work *_work) { notify_transport_statu
 static K_WORK_DEFINE(notify_status_work, notify_status_work_cb);
 
 static int zmk_split_esb_peripheral_init(void) {
+    async_state.tx_allowed_callback = tx_allowed_now;
+
     int ret = zmk_split_esb_init(APP_ESB_MODE_PTX, zmk_split_esb_on_ptx_esb_callback);
     if (ret < 0) {
         LOG_ERR("zmk_split_esb_init failed (ret %d)", ret);

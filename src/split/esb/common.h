@@ -18,7 +18,7 @@
  * state packet vs a generic event packet.  Peripheral IDs are always < 128,
  * so BIT(7) is free for use as a discriminant without adding a header byte.
  *
- * KEY_STATE packets carry a full bitmap of pressed key positions (position N →
+ * KEY_STATE packets carry a 64-key bitmap of pressed key positions (position N ->
  * byte N/8 bit N%8) plus a button-state byte (bit i = INPUT_BTN_0 + i).
  * Sending full state on every change makes the data idempotent over ESB:
  * duplicates XOR to zero diff and emit no phantom events.
@@ -50,8 +50,8 @@ struct esb_event_envelope {
     struct esb_event_payload payload;
 } __packed;
 
-/* 128 key positions encoded as a bitmask. */
-#define ESB_KEY_STATE_LEN 16
+/* 64 key positions encoded as a bitmask to keep key-state airtime low. */
+#define ESB_KEY_STATE_LEN 8
 
 /* Button bitmap: bit i corresponds to INPUT_BTN_0 + i (up to 8 buttons). */
 #define ESB_BTN_STATE_LEN 8
@@ -74,6 +74,7 @@ struct esb_msg_postfix {
 #define ESB_MSG_EXTRA_SIZE (sizeof(struct esb_msg_prefix) + sizeof(struct esb_msg_postfix))
 
 typedef void (*zmk_split_esb_process_tx_callback_t)(void);
+typedef bool (*zmk_split_esb_tx_allowed_callback_t)(void);
 
 struct zmk_split_esb_async_state {
     atomic_t state;
@@ -86,6 +87,7 @@ struct zmk_split_esb_async_state {
     struct ring_buf *rx_buf;
 
     zmk_split_esb_process_tx_callback_t process_tx_callback;
+    zmk_split_esb_tx_allowed_callback_t tx_allowed_callback;
 
     const struct device *uart;
 

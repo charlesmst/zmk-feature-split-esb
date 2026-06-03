@@ -44,6 +44,30 @@ config ZMK_SPLIT_ESB_CMD_BUFFER_ITEMS
     int "Number of central commands to buffer for TX/RX"
     default 4
 
+config ZMK_SPLIT_ESB_PERIPHERAL_TDMA
+    bool "Gate peripheral TX into deterministic 1 kHz TDMA windows"
+    default y
+
+config ZMK_SPLIT_ESB_TDMA_FRAME_US
+    int "Peripheral TDMA frame length in microseconds"
+    default 1000
+    depends on ZMK_SPLIT_ESB_PERIPHERAL_TDMA
+
+config ZMK_SPLIT_ESB_TDMA_SLOT_US
+    int "Peripheral TDMA normal slot length in microseconds"
+    default 250
+    depends on ZMK_SPLIT_ESB_PERIPHERAL_TDMA
+
+config ZMK_SPLIT_ESB_TDMA_MOUSE_PERIPHERAL_ID
+    int "Peripheral id that receives the extended mouse TDMA window"
+    default 3
+    depends on ZMK_SPLIT_ESB_PERIPHERAL_TDMA
+
+config ZMK_SPLIT_ESB_TDMA_MOUSE_SLOT_US
+    int "Extended mouse TDMA slot length in microseconds"
+    default 500
+    depends on ZMK_SPLIT_ESB_PERIPHERAL_TDMA
+
 module = ZMK_SPLIT_ESB
 module-str = ZMK_SPLIT_ESB
 source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"
