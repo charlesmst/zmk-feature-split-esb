@@ -69,7 +69,7 @@ static uint16_t jittered_retransmit_delay(void) {
     m_jitter_rng ^= m_jitter_rng >> 17;
     m_jitter_rng ^= m_jitter_rng << 5;
     const uint32_t base = CONFIG_ZMK_SPLIT_ESB_PROTO_TX_RETRANSMIT_DELAY;
-    const uint32_t span = base >> 2; /* 25% */
+    const uint32_t span = (base * 4) / 5; /* 80% */
     const int8_t off = (int8_t)(m_jitter_rng & 0xFFu);
     const int32_t delta = ((int32_t)span * off) / 128;
     int32_t d = (int32_t)base + delta;
