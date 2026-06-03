@@ -132,7 +132,19 @@ static struct tdma_window_state tdma_window_get_state(void) {
 }
 
 static bool tx_allowed_now(void) {
-    return tdma_window_get_state().remaining_us > TDMA_WINDOW_TX_GUARD_US;
+    struct tdma_window_state window = tdma_window_get_state();
+
+    if (window.delay_us > 0) {
+        k_work_reschedule(&tx_window_work, K_USEC(window.delay_us));
+        return false;
+    }
+
+    if (window.remaining_us <= TDMA_WINDOW_TX_GUARD_US) {
+        k_work_reschedule(&tx_window_work, K_USEC(TDMA_WINDOW_TX_GUARD_US));
+        return false;
+    }
+
+    return true;
 }
 
 static void tx_window_work_cb(struct k_work *work) {
