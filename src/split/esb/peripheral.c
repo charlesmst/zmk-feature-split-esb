@@ -201,6 +201,7 @@ static int send_position_state(void) {
         LOG_WRN("No room to send key state (have %d but only space for %d/%d)",
                 ESB_MSG_EXTRA_SIZE + payload_size, ring_buf_space_get(&chosen_tx_buf),
                 ring_buf_capacity_get(&chosen_tx_buf));
+        begin_tx();
         k_sem_give(&esb_send_evt_sem);
         return -ENOSPC;
     }
@@ -287,6 +288,7 @@ split_peripheral_esb_report_event(const struct zmk_split_transport_peripheral_ev
         LOG_WRN("No room to send event to the central (have %d but only space for %d/%d)",
                 ESB_MSG_EXTRA_SIZE + payload_size, ring_buf_space_get(&chosen_tx_buf),
                 ring_buf_capacity_get(&chosen_tx_buf));
+        begin_tx();
         k_sem_give(&esb_send_evt_sem);
         return -ENOSPC;
     }

@@ -96,7 +96,7 @@ struct zmk_split_esb_async_state {
     const struct gpio_dt_spec *dir_gpio;
 };
 
-void zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state);
+int zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state);
 
 void zmk_split_esb_cb(app_esb_event_t *event, struct zmk_split_esb_async_state *state);
 

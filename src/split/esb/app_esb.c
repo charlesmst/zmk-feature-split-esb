@@ -346,6 +346,11 @@ int zmk_split_esb_send(app_esb_data_t *tx_packet) {
     }
     ret = k_msgq_put(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
 
+    if (ret != 0 && m_active) {
+        pull_packet_from_tx_msgq();
+        ret = k_msgq_put(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
+    }
+
     // *** deprecated pre-emptive queuing logic ***
     // if (ret == -EAGAIN || ret == -ENOMSG) {
     //     LOG_WRN("esb tx_payload_q full, popping first message and queueing again");

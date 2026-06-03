@@ -13,12 +13,12 @@
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_SPLIT_ESB_LOG_LEVEL);
 
-void zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state) {
+int zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state) {
     size_t tx_buf_len = ring_buf_size_get(state->tx_buf);
     // LOG_DBG("tx_buf_len %u, CONFIG_ESB_MAX_PAYLOAD_LENGTH %u", 
     //         tx_buf_len, CONFIG_ESB_MAX_PAYLOAD_LENGTH);
     if (!tx_buf_len) {
-        return;
+        return 0;
     }
     tx_buf_len = MIN(tx_buf_len, CONFIG_ESB_MAX_PAYLOAD_LENGTH);
     // LOG_DBG("tx_buf_len %d", tx_buf_len);
@@ -35,7 +35,7 @@ void zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state) {
         claim_len += buf_len;
     }
     if (claim_len <= 0) {
-        return;
+        return -EAGAIN;
     }
     // LOG_DBG("tx_buf_len: %d, claim_len: %d", tx_buf_len, claim_len);
     // LOG_HEXDUMP_DBG(buf, claim_len, "buf");
@@ -43,10 +43,14 @@ void zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state) {
     static app_esb_data_t my_data;
     my_data.data = buf;
     my_data.len = claim_len;
-    zmk_split_esb_send(&my_data); // callback > zmk_split_esb_cb()
+    int ret = zmk_split_esb_send(&my_data); // callback > zmk_split_esb_cb()
+    if (ret < 0) {
+        return ret;
+    }
 
     // LOG_DBG("ESB TX Buf finish %d", claim_len);
     ring_buf_get_finish(state->tx_buf, claim_len);
+    return 0;
 }
 
 static K_SEM_DEFINE(esb_cb_sem, 1, 1);
