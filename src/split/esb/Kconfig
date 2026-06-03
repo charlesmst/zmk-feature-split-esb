@@ -55,7 +55,7 @@ config ZMK_SPLIT_ESB_TDMA_FRAME_US
 
 config ZMK_SPLIT_ESB_TDMA_SLOT_US
     int "Peripheral TDMA normal slot length in microseconds"
-    default 125
+    default 500
     depends on ZMK_SPLIT_ESB_PERIPHERAL_TDMA
 
 config ZMK_SPLIT_ESB_TDMA_MOUSE_PERIPHERAL_ID
@@ -65,7 +65,7 @@ config ZMK_SPLIT_ESB_TDMA_MOUSE_PERIPHERAL_ID
 
 config ZMK_SPLIT_ESB_TDMA_MOUSE_SLOT_US
     int "Extended mouse TDMA slot length in microseconds"
-    default 750
+    default 500
     depends on ZMK_SPLIT_ESB_PERIPHERAL_TDMA
 
 module = ZMK_SPLIT_ESB

@@ -95,6 +95,10 @@ static struct tdma_window_state tdma_window_get_state(void) {
         mouse_slot_us = frame_us;
     }
 
+    uint32_t now_us = k_cyc_to_us_floor32(k_cycle_get_32());
+    uint32_t frame_index = now_us / frame_us;
+    uint32_t offset_us = now_us % frame_us;
+
     if (peripheral_id == CONFIG_ZMK_SPLIT_ESB_TDMA_MOUSE_PERIPHERAL_ID) {
         window_us = mouse_slot_us;
         start_us = frame_us - mouse_slot_us;
@@ -106,14 +110,30 @@ static struct tdma_window_state tdma_window_get_state(void) {
         }
 
         uint32_t slot_index = peripheral_id > 0 ? peripheral_id - 1 : 0;
-        slot_index %= normal_slots;
-        start_us = slot_index * normal_slot_us;
-        if (start_us + window_us > frame_us) {
-            window_us = frame_us - start_us;
+
+        if (normal_slots == 1 && CONFIG_ZMK_SPLIT_ESB_TDMA_MOUSE_PERIPHERAL_ID > 1) {
+            uint32_t keyboard_slots = CONFIG_ZMK_SPLIT_ESB_TDMA_MOUSE_PERIPHERAL_ID - 1;
+            uint32_t active_slot = frame_index % keyboard_slots;
+            slot_index %= keyboard_slots;
+            start_us = 0;
+            window_us = MIN(normal_slot_us, non_mouse_us);
+
+            if (slot_index != active_slot) {
+                uint32_t frames_until = (slot_index + keyboard_slots - active_slot) % keyboard_slots;
+                if (frames_until == 0) {
+                    frames_until = keyboard_slots;
+                }
+                return (struct tdma_window_state){.delay_us = (frames_until * frame_us) - offset_us};
+            }
+        } else {
+            slot_index %= normal_slots;
+            start_us = slot_index * normal_slot_us;
+            if (start_us + window_us > frame_us) {
+                window_us = frame_us - start_us;
+            }
         }
     }
 
-    uint32_t offset_us = k_cyc_to_us_floor32(k_cycle_get_32()) % frame_us;
     if (offset_us >= start_us && offset_us < start_us + window_us) {
         return (struct tdma_window_state){
             .delay_us = 0,
