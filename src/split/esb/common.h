@@ -50,8 +50,8 @@ struct esb_event_envelope {
     struct esb_event_payload payload;
 } __packed;
 
-/* 128 key positions encoded as a bitmask. */
-#define ESB_KEY_STATE_LEN 16
+/* 64 key positions encoded as a bitmask. */
+#define ESB_KEY_STATE_LEN 8
 
 /* Button bitmap: bit i corresponds to INPUT_BTN_0 + i (up to 8 buttons). */
 #define ESB_BTN_STATE_LEN 8
