@@ -365,7 +365,10 @@ static void notify_status_work_cb(struct k_work *_work) { notify_transport_statu
 static K_WORK_DEFINE(notify_status_work, notify_status_work_cb);
 
 static int zmk_split_esb_peripheral_init(void) {
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_ESB_PERIPHERAL_TDMA)
     async_state.tx_allowed_callback = tx_allowed_now;
+    async_state.preserve_tx_on_send_error = true;
+#endif
 
     int ret = zmk_split_esb_init(APP_ESB_MODE_PTX, zmk_split_esb_on_ptx_esb_callback);
     if (ret < 0) {

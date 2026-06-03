@@ -346,10 +346,12 @@ int zmk_split_esb_send(app_esb_data_t *tx_packet) {
     }
     ret = k_msgq_put(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
 
-    if (ret != 0 && m_active) {
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_ESB_PERIPHERAL_TDMA)
+    if (ret != 0 && m_active && m_mode == APP_ESB_MODE_PTX) {
         pull_packet_from_tx_msgq();
         ret = k_msgq_put(&m_msgq_tx_payloads, &tx_payload, K_NO_WAIT);
     }
+#endif
 
     // *** deprecated pre-emptive queuing logic ***
     // if (ret == -EAGAIN || ret == -ENOMSG) {

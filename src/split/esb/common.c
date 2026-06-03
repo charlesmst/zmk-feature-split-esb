@@ -44,7 +44,7 @@ int zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state) {
     my_data.data = buf;
     my_data.len = claim_len;
     int ret = zmk_split_esb_send(&my_data); // callback > zmk_split_esb_cb()
-    if (ret < 0) {
+    if (ret < 0 && state->preserve_tx_on_send_error) {
         return ret;
     }
 

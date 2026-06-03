@@ -88,6 +88,7 @@ struct zmk_split_esb_async_state {
 
     zmk_split_esb_process_tx_callback_t process_tx_callback;
     zmk_split_esb_tx_allowed_callback_t tx_allowed_callback;
+    bool preserve_tx_on_send_error;
 
     const struct device *uart;
 
