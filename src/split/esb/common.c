@@ -21,6 +21,22 @@ int zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state) {
         return 0;
     }
     tx_buf_len = MIN(tx_buf_len, CONFIG_ESB_MAX_PAYLOAD_LENGTH);
+
+    /* When the buffer has more data than one ESB payload can carry, align to
+     * a message boundary rather than truncating mid-message.  A split message
+     * whose second fragment is lost (TDMA window close) leaves the central
+     * with a dangling prefix → CRC corruption in zmk_split_esb_get_item. */
+    if (tx_buf_len < ring_buf_size_get(state->tx_buf)) {
+        struct esb_msg_prefix peek_prefix;
+        if (ring_buf_peek(state->tx_buf, (uint8_t *)&peek_prefix, sizeof(peek_prefix))
+                == sizeof(peek_prefix)) {
+            size_t msg_total = sizeof(peek_prefix) + peek_prefix.payload_size
+                               + sizeof(struct esb_msg_postfix);
+            if (msg_total <= CONFIG_ESB_MAX_PAYLOAD_LENGTH) {
+                tx_buf_len = msg_total;
+            }
+        }
+    }
     // LOG_DBG("tx_buf_len %d", tx_buf_len);
 
     uint8_t buf[CONFIG_ESB_MAX_PAYLOAD_LENGTH];
@@ -45,6 +61,7 @@ int zmk_split_esb_async_tx(struct zmk_split_esb_async_state *state) {
     my_data.len = claim_len;
     int ret = zmk_split_esb_send(&my_data); // callback > zmk_split_esb_cb()
     if (ret < 0 && state->preserve_tx_on_send_error) {
+        ring_buf_get_finish(state->tx_buf, 0); // revert claim so bytes are re-claimable next window
         return ret;
     }
 
