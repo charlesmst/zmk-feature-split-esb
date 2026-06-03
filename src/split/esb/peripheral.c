@@ -62,6 +62,8 @@ static void tx_window_work_cb(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(tx_window_work, tx_window_work_cb);
 K_MSGQ_DEFINE(cmd_msg_queue, sizeof(struct zmk_split_transport_central_command), 3, 4);
 
+static bool tx_burst_active;
+
 uint8_t async_rx_buf[RX_BUFFER_SIZE / 2][2];
 
 static struct zmk_split_esb_async_state async_state = {
@@ -152,6 +154,15 @@ static struct tdma_window_state tdma_window_get_state(void) {
 }
 
 static bool tx_allowed_now(void) {
+    if (tx_burst_active) {
+        if (ring_buf_is_empty(&chosen_tx_buf)) {
+            tx_burst_active = false;
+            return false;
+        }
+
+        return true;
+    }
+
     struct tdma_window_state window = tdma_window_get_state();
 
     if (window.delay_us > 0) {
@@ -176,17 +187,24 @@ static void tx_window_work_cb(struct k_work *work) {
 }
 
 static void begin_tx(void) {
-    struct tdma_window_state window = tdma_window_get_state();
-    if (window.delay_us > 0) {
-        k_work_reschedule(&tx_window_work, K_USEC(window.delay_us));
-        return;
-    }
-    if (window.remaining_us <= TDMA_WINDOW_TX_GUARD_US) {
-        k_work_reschedule(&tx_window_work, K_USEC(TDMA_WINDOW_TX_GUARD_US));
-        return;
+    if (!tx_burst_active) {
+        struct tdma_window_state window = tdma_window_get_state();
+        if (window.delay_us > 0) {
+            k_work_reschedule(&tx_window_work, K_USEC(window.delay_us));
+            return;
+        }
+        if (window.remaining_us <= TDMA_WINDOW_TX_GUARD_US) {
+            k_work_reschedule(&tx_window_work, K_USEC(TDMA_WINDOW_TX_GUARD_US));
+            return;
+        }
+
+        tx_burst_active = !ring_buf_is_empty(&chosen_tx_buf);
     }
 
     zmk_split_esb_async_tx(&async_state);
+    if (ring_buf_is_empty(&chosen_tx_buf)) {
+        tx_burst_active = false;
+    }
 }
 
 void zmk_split_esb_on_ptx_esb_callback(app_esb_event_t *event) {
