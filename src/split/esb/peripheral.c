@@ -287,6 +287,23 @@ static void process_tx_cb(void) {
         case 0:
             if (env.payload.cmd.type == ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_POLL_EVENTS) {
                 begin_tx();
+            } else if (env.payload.cmd.type ==
+                       ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_TRANSPORT_CHANGED) {
+                /* Broadcast — processed by every peripheral, no source check.
+                 * Idempotent: only forward when the value actually changes, so we
+                 * don't re-raise the event (and re-touch the sensor's rate
+                 * registers) on every duplicate copy in the convergence window. */
+                static uint8_t last_transport = 0xFF;
+                uint8_t t = env.payload.cmd.data.set_transport.transport;
+                if (t != last_transport) {
+                    last_transport = t;
+                    int ret = k_msgq_put(&cmd_msg_queue, &env.payload.cmd, K_NO_WAIT);
+                    if (ret < 0) {
+                        LOG_WRN("Failed to queue transport command (%d)", ret);
+                        return;
+                    }
+                    k_work_submit(&publish_commands);
+                }
             } else {
                 if (env.payload.source != peripheral_id) {
                     LOG_WRN("Ignoring command type %d for source %d (expect %d)", 

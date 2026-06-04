@@ -21,6 +21,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_SPLIT_ESB_LOG_LEVEL);
 #include <zmk/split/transport/central.h>
 #include <zmk/split/transport/types.h>
 #include <zmk/event_manager.h>
+#include <zmk/endpoints.h>
+#include <zmk/endpoints_types.h>
+#include <zmk/events/endpoint_changed.h>
 #include <zmk/events/position_state_changed.h>
 #include <zmk/events/sensor_event.h>
 #include <zmk/pointing/input_split.h>
@@ -72,6 +75,8 @@ static ssize_t get_payload_data_size(const struct zmk_split_transport_central_co
         return sizeof(cmd->data.set_physical_layout);
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_HID_INDICATORS:
         return sizeof(cmd->data.set_hid_indicators);
+    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_TRANSPORT_CHANGED:
+        return sizeof(cmd->data.set_transport);
     default:
         return -ENOTSUP;
     }
@@ -226,6 +231,86 @@ static void process_key_state(uint8_t source, const uint8_t *new_state, uint8_t 
     }
 }
 
+/* ---- Output-transport broadcast to ESB peripherals ------------------------
+ *
+ * Peripherals switch their hardware sensor rate depending on whether the central
+ * is currently outputting over USB or BLE. The central can only reach peripherals
+ * via ESB ACK payloads on a shared pipe — whichever peripheral transmits next
+ * consumes the next payload — so reliable *addressed* delivery is impossible.
+ *
+ * Instead of pushing an addressed, retried message (which polluted the RX hot
+ * path and slowed the mouse), we replicate one tiny idempotent value: the current
+ * transport. After it changes we open a short "convergence window" during which a
+ * timer queues a single TRANSPORT_CHANGED broadcast at a modest cadence. Every
+ * peripheral processes the broadcast with no source check and applies it only when
+ * the value actually changes, so duplicate deliveries are free and a missed copy
+ * is simply picked up from the next one. After the window we go quiet again —
+ * steady state adds nothing to the link. None of this runs on the event hot path.
+ *
+ * The window is also (re)opened whenever a peripheral is first heard or heard
+ * again after a gap (a (re)connect), so a peripheral that was silent during the
+ * change still converges as soon as it starts transmitting. */
+#define ESB_BROADCAST_TICK_MS       30
+#define ESB_BROADCAST_WINDOW_MS     600
+#define ESB_SOURCE_RECONNECT_GAP_MS 1500
+
+static uint8_t current_transport = ZMK_TRANSPORT_USB;
+static atomic_t broadcast_window_until;
+static int64_t source_last_seen[UINT8_MAX + 1];
+
+static void esb_broadcast_tick_work(struct k_work *work) {
+    if (k_uptime_get() >= atomic_get(&broadcast_window_until)) {
+        return;
+    }
+    /* Keep at most one broadcast pending and let any real command go first. */
+    if (ring_buf_is_empty(&tx_buf)) {
+        struct zmk_split_transport_central_command cmd = {
+            .type = ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_TRANSPORT_CHANGED,
+            .data = {.set_transport = {.transport = current_transport}},
+        };
+        split_central_esb_send_command(0, cmd);
+    }
+}
+static K_WORK_DEFINE(esb_broadcast_tick, esb_broadcast_tick_work);
+
+static void esb_broadcast_timer_fn(struct k_timer *timer) {
+    if (k_uptime_get() >= atomic_get(&broadcast_window_until)) {
+        k_timer_stop(timer);
+        return;
+    }
+    k_work_submit(&esb_broadcast_tick);
+}
+static K_TIMER_DEFINE(esb_broadcast_timer, esb_broadcast_timer_fn, NULL);
+
+static void esb_open_broadcast_window(void) {
+    atomic_set(&broadcast_window_until, k_uptime_get() + ESB_BROADCAST_WINDOW_MS);
+    k_timer_start(&esb_broadcast_timer, K_NO_WAIT, K_MSEC(ESB_BROADCAST_TICK_MS));
+}
+
+/* Called from the RX path for every peripheral packet. Cheap: a timestamp
+ * compare/store, plus a window (re)open on first sight or after a gap. */
+static void esb_note_source_seen(uint8_t source) {
+    int64_t now = k_uptime_get();
+    int64_t prev = source_last_seen[source];
+    source_last_seen[source] = now;
+    if (prev == 0 || (now - prev) > ESB_SOURCE_RECONNECT_GAP_MS) {
+        esb_open_broadcast_window();
+    }
+}
+
+static int esb_central_on_endpoint_changed(const zmk_event_t *eh) {
+    const struct zmk_endpoint_changed *ev = as_zmk_endpoint_changed(eh);
+    if (!ev) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+    current_transport = ev->endpoint.transport;
+    esb_open_broadcast_window();
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(esb_central_endpoint, esb_central_on_endpoint_changed);
+ZMK_SUBSCRIPTION(esb_central_endpoint, zmk_endpoint_changed);
+
 static void notify_transport_status(void) {
     if (transport_status_cb) {
         transport_status_cb(&esb_central, split_central_esb_get_status());
@@ -242,6 +327,9 @@ static int zmk_split_esb_central_init(void) {
         LOG_ERR("zmk_split_esb_init failed (err %d)", ret);
         return ret;
     }
+    /* Seed the broadcast value from the endpoint already selected at boot, so a
+     * peripheral that connects before the first endpoint_changed still converges. */
+    current_transport = zmk_endpoints_selected().transport;
     k_work_submit(&notify_status_work);
     return 0;
 }
@@ -261,8 +349,9 @@ static void publish_events_work(struct k_work *work) {
         switch (item_err) {
         case 0: {
             uint8_t raw_source = env_buf.key_state_env.payload.source;
+            uint8_t source = raw_source & ~ESB_SOURCE_KEY_STATE_FLAG;
+            esb_note_source_seen(source);
             if (raw_source & ESB_SOURCE_KEY_STATE_FLAG) {
-                uint8_t source = raw_source & ~ESB_SOURCE_KEY_STATE_FLAG;
                 process_key_state(source, env_buf.key_state_env.payload.state,
                                   env_buf.key_state_env.payload.button_state);
             } else {
