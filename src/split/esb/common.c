@@ -128,9 +128,17 @@ int zmk_split_esb_get_item(struct ring_buf *rx_buf, uint8_t *env, size_t env_siz
         size_t payload_to_read = sizeof(prefix) + prefix.payload_size;
 
         if (payload_to_read > env_size) {
-            LOG_WRN("Invalid message with payload %d bigger than expected max %d", payload_to_read,
-                    env_size);
-            return -EINVAL;
+            /* The magic matched but the size field is impossible — almost always a
+             * false magic match on desynced/corrupt data. Discard one byte and
+             * resync (like the magic-mismatch path) instead of returning without
+             * consuming: bailing here leaves these bytes at the head of the buffer
+             * forever, so every later RX re-hits them, the ring buffer never drains,
+             * and all peripheral input stalls until a reboot. */
+            uint8_t discarded_byte;
+            ring_buf_get(rx_buf, &discarded_byte, 1);
+            LOG_WRN("Oversized payload %d > max %d, discarding byte %0x to resync",
+                    payload_to_read, env_size, discarded_byte);
+            continue;
         }
 
         if (ring_buf_size_get(rx_buf) < payload_to_read + sizeof(struct esb_msg_postfix)) {
