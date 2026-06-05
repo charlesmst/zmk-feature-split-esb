@@ -268,7 +268,10 @@ static void esb_broadcast_tick_work(struct k_work *work) {
             .type = ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_TRANSPORT_CHANGED,
             .data = {.set_transport = {.transport = current_transport}},
         };
-        split_central_esb_send_command(0, cmd);
+        int r = split_central_esb_send_command(0, cmd);
+        LOG_WRN("ESB-C bcast tx transport=%d ret=%d", current_transport, r);
+    } else {
+        LOG_WRN("ESB-C bcast skipped (tx_buf not empty)");
     }
 }
 static K_WORK_DEFINE(esb_broadcast_tick, esb_broadcast_tick_work);
@@ -304,6 +307,7 @@ static int esb_central_on_endpoint_changed(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_BUBBLE;
     }
     current_transport = ev->endpoint.transport;
+    LOG_WRN("ESB-C endpoint_changed transport=%d, opening broadcast window", current_transport);
     esb_open_broadcast_window();
     return ZMK_EV_EVENT_BUBBLE;
 }
