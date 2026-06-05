@@ -247,16 +247,17 @@ static void process_key_state(uint8_t source, const uint8_t *new_state, uint8_t 
  * is simply picked up from the next one. After the window we go quiet again —
  * steady state adds nothing to the link. None of this runs on the event hot path.
  *
- * The window is also (re)opened whenever a peripheral is first heard or heard
- * again after a gap (a (re)connect), so a peripheral that was silent during the
- * change still converges as soon as it starts transmitting. */
+ * Only an actual USB<->BLE endpoint change opens a window. We deliberately do NOT
+ * re-broadcast on peripheral idle/reconnect: the mouse goes quiet for >1s
+ * constantly during normal use, and re-opening the window on every gap floods the
+ * shared ACK-payload pipe and starves the peripherals' own key/button traffic. A
+ * peripheral that reboots simply stays at its boot (USB) rate until the next
+ * endpoint change — a minor, self-correcting edge case. */
 #define ESB_BROADCAST_TICK_MS       30
 #define ESB_BROADCAST_WINDOW_MS     600
-#define ESB_SOURCE_RECONNECT_GAP_MS 1500
 
 static uint8_t current_transport = ZMK_TRANSPORT_USB;
 static atomic_t broadcast_window_until;
-static int64_t source_last_seen[UINT8_MAX + 1];
 
 static void esb_broadcast_tick_work(struct k_work *work) {
     if (k_uptime_get() >= atomic_get(&broadcast_window_until)) {
@@ -268,10 +269,7 @@ static void esb_broadcast_tick_work(struct k_work *work) {
             .type = ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_TRANSPORT_CHANGED,
             .data = {.set_transport = {.transport = current_transport}},
         };
-        int r = split_central_esb_send_command(0, cmd);
-        LOG_WRN("ESB-C bcast tx transport=%d ret=%d", current_transport, r);
-    } else {
-        LOG_WRN("ESB-C bcast skipped (tx_buf not empty)");
+        split_central_esb_send_command(0, cmd);
     }
 }
 static K_WORK_DEFINE(esb_broadcast_tick, esb_broadcast_tick_work);
@@ -290,24 +288,12 @@ static void esb_open_broadcast_window(void) {
     k_timer_start(&esb_broadcast_timer, K_NO_WAIT, K_MSEC(ESB_BROADCAST_TICK_MS));
 }
 
-/* Called from the RX path for every peripheral packet. Cheap: a timestamp
- * compare/store, plus a window (re)open on first sight or after a gap. */
-static void esb_note_source_seen(uint8_t source) {
-    int64_t now = k_uptime_get();
-    int64_t prev = source_last_seen[source];
-    source_last_seen[source] = now;
-    if (prev == 0 || (now - prev) > ESB_SOURCE_RECONNECT_GAP_MS) {
-        esb_open_broadcast_window();
-    }
-}
-
 static int esb_central_on_endpoint_changed(const zmk_event_t *eh) {
     const struct zmk_endpoint_changed *ev = as_zmk_endpoint_changed(eh);
     if (!ev) {
         return ZMK_EV_EVENT_BUBBLE;
     }
     current_transport = ev->endpoint.transport;
-    LOG_WRN("ESB-C endpoint_changed transport=%d, opening broadcast window", current_transport);
     esb_open_broadcast_window();
     return ZMK_EV_EVENT_BUBBLE;
 }
@@ -354,7 +340,6 @@ static void publish_events_work(struct k_work *work) {
         case 0: {
             uint8_t raw_source = env_buf.key_state_env.payload.source;
             uint8_t source = raw_source & ~ESB_SOURCE_KEY_STATE_FLAG;
-            esb_note_source_seen(source);
             if (raw_source & ESB_SOURCE_KEY_STATE_FLAG) {
                 process_key_state(source, env_buf.key_state_env.payload.state,
                                   env_buf.key_state_env.payload.button_state);

@@ -295,7 +295,6 @@ static void process_tx_cb(void) {
                  * registers) on every duplicate copy in the convergence window. */
                 static uint8_t last_transport = 0xFF;
                 uint8_t t = env.payload.cmd.data.set_transport.transport;
-                LOG_WRN("ESB-P rx TRANSPORT_CHANGED=%d (last=%d)", t, last_transport);
                 if (t != last_transport) {
                     last_transport = t;
                     int ret = k_msgq_put(&cmd_msg_queue, &env.payload.cmd, K_NO_WAIT);
